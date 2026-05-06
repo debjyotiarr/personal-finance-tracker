@@ -22,6 +22,7 @@ await ensureDirectories();
 const db = new DatabaseSync(dbPath);
 initializeDatabase(db);
 ensureAccountsSchema(db);
+ensureTransactionsSchema(db);
 seedStarterCategories(db);
 
 const server = createServer(async (req, res) => {
@@ -187,6 +188,63 @@ function ensureAccountsSchema(database) {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_name_last4
     ON accounts (name, IFNULL(last4, ''));
   `);
+}
+
+function ensureTransactionsSchema(database) {
+  const tableSqlRow = database
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'transactions'")
+    .get();
+
+  if (!tableSqlRow?.sql || !tableSqlRow.sql.includes('"accounts_legacy"')) {
+    return;
+  }
+
+  database.exec("PRAGMA foreign_keys = OFF;");
+  database.exec("BEGIN;");
+  try {
+    database.exec(`
+      ALTER TABLE transactions RENAME TO transactions_legacy;
+
+      CREATE TABLE transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        txn_type TEXT NOT NULL CHECK(txn_type IN ('debit', 'credit', 'transfer')),
+        txn_date TEXT NOT NULL,
+        posted_date TEXT,
+        amount REAL NOT NULL CHECK(amount > 0),
+        category_id INTEGER,
+        subcategory_id INTEGER,
+        account_id INTEGER,
+        description TEXT NOT NULL DEFAULT '',
+        note TEXT DEFAULT '',
+        duplicate_flag TEXT NOT NULL DEFAULT 'none' CHECK(duplicate_flag IN ('none', 'near_duplicate', 'resolved')),
+        duplicate_reference TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(category_id) REFERENCES categories(id),
+        FOREIGN KEY(subcategory_id) REFERENCES categories(id),
+        FOREIGN KEY(account_id) REFERENCES accounts(id)
+      );
+
+      INSERT INTO transactions (
+        id, txn_type, txn_date, posted_date, amount, category_id, subcategory_id,
+        account_id, description, note, duplicate_flag, duplicate_reference,
+        created_at, updated_at
+      )
+      SELECT
+        id, txn_type, txn_date, posted_date, amount, category_id, subcategory_id,
+        account_id, description, note, duplicate_flag, duplicate_reference,
+        created_at, updated_at
+      FROM transactions_legacy;
+
+      DROP TABLE transactions_legacy;
+    `);
+    database.exec("COMMIT;");
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    database.exec("PRAGMA foreign_keys = ON;");
+    throw error;
+  }
+  database.exec("PRAGMA foreign_keys = ON;");
 }
 
 async function handleApi(req, res, url) {
