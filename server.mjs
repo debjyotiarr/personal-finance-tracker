@@ -1,0 +1,848 @@
+import { createServer } from "node:http";
+import { readFile, stat, mkdir } from "node:fs/promises";
+import { createReadStream, existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { randomUUID, pbkdf2Sync, timingSafeEqual } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const publicDir = path.join(__dirname, "public");
+const dataDir = path.join(__dirname, "data");
+const dbPath = path.join(dataDir, "app.db");
+const uploadsDir = path.join(dataDir, "uploads");
+const exportsDir = path.join(dataDir, "exports");
+const sessions = new Map();
+const nearDuplicateTolerance = 10;
+const defaultPort = Number(process.env.PORT || 3000);
+const defaultHost = process.env.HOST || "127.0.0.1";
+
+await ensureDirectories();
+const db = new DatabaseSync(dbPath);
+initializeDatabase(db);
+seedStarterCategories(db);
+
+const server = createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+
+    if (url.pathname.startsWith("/api/")) {
+      await handleApi(req, res, url);
+      return;
+    }
+
+    await serveStatic(req, res, url);
+  } catch (error) {
+    console.error(error);
+    sendJson(res, 500, { error: "Internal server error" });
+  }
+});
+
+server.on("error", (error) => {
+  console.error(`Unable to start FinanceTracker on http://${defaultHost}:${defaultPort}`);
+  console.error(error);
+  process.exitCode = 1;
+});
+
+server.listen(defaultPort, defaultHost, () => {
+  console.log(`FinanceTracker running at http://${defaultHost}:${defaultPort}`);
+});
+
+async function ensureDirectories() {
+  await mkdir(dataDir, { recursive: true });
+  await mkdir(uploadsDir, { recursive: true });
+  await mkdir(exportsDir, { recursive: true });
+}
+
+function initializeDatabase(database) {
+  database.exec(`
+    PRAGMA foreign_keys = ON;
+
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      password_salt TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS categories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      icon TEXT NOT NULL,
+      parent_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(parent_id) REFERENCES categories(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS accounts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      last4 TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      txn_type TEXT NOT NULL CHECK(txn_type IN ('debit', 'credit', 'transfer')),
+      txn_date TEXT NOT NULL,
+      posted_date TEXT,
+      amount REAL NOT NULL CHECK(amount > 0),
+      category_id INTEGER,
+      subcategory_id INTEGER,
+      account_id INTEGER,
+      description TEXT NOT NULL DEFAULT '',
+      note TEXT DEFAULT '',
+      duplicate_flag TEXT NOT NULL DEFAULT 'none' CHECK(duplicate_flag IN ('none', 'near_duplicate', 'resolved')),
+      duplicate_reference TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(category_id) REFERENCES categories(id),
+      FOREIGN KEY(subcategory_id) REFERENCES categories(id),
+      FOREIGN KEY(account_id) REFERENCES accounts(id)
+    );
+  `);
+}
+
+function seedStarterCategories(database) {
+  const count = database.prepare("SELECT COUNT(*) AS count FROM categories WHERE parent_id IS NULL").get().count;
+  if (count > 0) {
+    return;
+  }
+
+  const starterCategories = [
+    ["Food", "fork-knife"],
+    ["Groceries", "basket"],
+    ["Transport", "car"],
+    ["Bills", "receipt"],
+    ["Shopping", "bag"],
+    ["Health", "heart-pulse"],
+    ["Entertainment", "film"],
+    ["Travel", "plane"],
+    ["Income", "wallet"],
+    ["Transfers", "arrows-left-right"],
+    ["Miscellaneous", "shapes"]
+  ];
+
+  const insert = database.prepare(`
+    INSERT INTO categories (name, icon, parent_id)
+    VALUES (?, ?, NULL)
+  `);
+
+  for (const [name, icon] of starterCategories) {
+    insert.run(name, icon);
+  }
+}
+
+async function handleApi(req, res, url) {
+  const session = getSession(req);
+
+  if (req.method === "GET" && url.pathname === "/api/bootstrap") {
+    const user = getCurrentUser(session);
+    sendJson(res, 200, {
+      hasUser: hasAnyUser(),
+      user
+    });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/setup") {
+    if (hasAnyUser()) {
+      sendJson(res, 400, { error: "Setup is already complete." });
+      return;
+    }
+
+    const body = await readJson(req);
+    const username = sanitizeText(body.username, 40);
+    const password = String(body.password || "");
+
+    if (!username || password.length < 8) {
+      sendJson(res, 400, { error: "Username is required and password must be at least 8 characters." });
+      return;
+    }
+
+    const { hash, salt } = hashPassword(password);
+    const result = db.prepare(`
+      INSERT INTO users (username, password_hash, password_salt)
+      VALUES (?, ?, ?)
+    `).run(username, hash, salt);
+
+    const createdUser = db.prepare("SELECT id, username FROM users WHERE id = ?").get(result.lastInsertRowid);
+    createSession(res, createdUser);
+    sendJson(res, 201, { user: createdUser });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/login") {
+    const body = await readJson(req);
+    const username = sanitizeText(body.username, 40);
+    const password = String(body.password || "");
+    const userRow = db.prepare("SELECT * FROM users WHERE username = ?").get(username);
+
+    if (!userRow || !verifyPassword(password, userRow.password_salt, userRow.password_hash)) {
+      sendJson(res, 401, { error: "Invalid username or password." });
+      return;
+    }
+
+    createSession(res, { id: userRow.id, username: userRow.username });
+    sendJson(res, 200, { user: { id: userRow.id, username: userRow.username } });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/logout") {
+    destroySession(req, res);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (!session) {
+    sendJson(res, 401, { error: "Authentication required." });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/categories") {
+    sendJson(res, 200, { categories: fetchCategories() });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/categories") {
+    const body = await readJson(req);
+    const payload = validateCategoryPayload(body);
+    if (payload.error) {
+      sendJson(res, 400, { error: payload.error });
+      return;
+    }
+
+    const topLevelCount = db.prepare("SELECT COUNT(*) AS count FROM categories WHERE parent_id IS NULL").get().count;
+    if (!payload.parentId && topLevelCount >= 50) {
+      sendJson(res, 400, { error: "The maximum of 50 top-level categories has been reached." });
+      return;
+    }
+
+    const inserted = db.prepare(`
+      INSERT INTO categories (name, icon, parent_id, updated_at)
+      VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    `).run(payload.name, payload.icon, payload.parentId);
+
+    const created = db.prepare("SELECT * FROM categories WHERE id = ?").get(inserted.lastInsertRowid);
+    sendJson(res, 201, { category: created, categories: fetchCategories() });
+    return;
+  }
+
+  if (req.method === "PATCH" && url.pathname.startsWith("/api/categories/")) {
+    const id = Number(url.pathname.split("/").pop());
+    const existing = db.prepare("SELECT * FROM categories WHERE id = ?").get(id);
+    if (!existing) {
+      sendJson(res, 404, { error: "Category not found." });
+      return;
+    }
+
+    const body = await readJson(req);
+    const payload = validateCategoryPayload({ ...existing, ...body });
+    if (payload.error) {
+      sendJson(res, 400, { error: payload.error });
+      return;
+    }
+
+    db.prepare(`
+      UPDATE categories
+      SET name = ?, icon = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(payload.name, payload.icon, id);
+
+    sendJson(res, 200, { categories: fetchCategories() });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/accounts") {
+    const accounts = db.prepare(`
+      SELECT id, name, last4, created_at, updated_at
+      FROM accounts
+      ORDER BY name COLLATE NOCASE ASC
+    `).all();
+    sendJson(res, 200, { accounts });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/accounts") {
+    const body = await readJson(req);
+    const payload = validateAccountPayload(body);
+    if (payload.error) {
+      sendJson(res, 400, { error: payload.error });
+      return;
+    }
+
+    const inserted = db.prepare(`
+      INSERT INTO accounts (name, last4, updated_at)
+      VALUES (?, ?, CURRENT_TIMESTAMP)
+    `).run(payload.name, payload.last4);
+
+    const account = db.prepare("SELECT * FROM accounts WHERE id = ?").get(inserted.lastInsertRowid);
+    sendJson(res, 201, { account });
+    return;
+  }
+
+  if (req.method === "PATCH" && url.pathname.startsWith("/api/accounts/")) {
+    const id = Number(url.pathname.split("/").pop());
+    const existing = db.prepare("SELECT * FROM accounts WHERE id = ?").get(id);
+    if (!existing) {
+      sendJson(res, 404, { error: "Account not found." });
+      return;
+    }
+
+    const body = await readJson(req);
+    const payload = validateAccountPayload({ ...existing, ...body });
+    if (payload.error) {
+      sendJson(res, 400, { error: payload.error });
+      return;
+    }
+
+    db.prepare(`
+      UPDATE accounts
+      SET name = ?, last4 = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(payload.name, payload.last4, id);
+
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/transactions") {
+    sendJson(res, 200, fetchTransactions(url.searchParams));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/transactions") {
+    const body = await readJson(req);
+    const payload = validateTransactionPayload(body);
+    if (payload.error) {
+      sendJson(res, 400, { error: payload.error });
+      return;
+    }
+
+    const duplicateInfo = detectNearDuplicate(payload);
+    const inserted = db.prepare(`
+      INSERT INTO transactions (
+        txn_type, txn_date, posted_date, amount, category_id, subcategory_id,
+        account_id, description, note, duplicate_flag, duplicate_reference, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `).run(
+      payload.txnType,
+      payload.txnDate,
+      payload.postedDate,
+      payload.amount,
+      payload.categoryId,
+      payload.subcategoryId,
+      payload.accountId,
+      payload.description,
+      payload.note,
+      duplicateInfo.flag,
+      duplicateInfo.reference
+    );
+
+    const transaction = fetchTransactionById(inserted.lastInsertRowid);
+    sendJson(res, 201, { transaction });
+    return;
+  }
+
+  if (req.method === "PATCH" && url.pathname.startsWith("/api/transactions/")) {
+    const id = Number(url.pathname.split("/").pop());
+    const existing = db.prepare("SELECT * FROM transactions WHERE id = ?").get(id);
+    if (!existing) {
+      sendJson(res, 404, { error: "Transaction not found." });
+      return;
+    }
+
+    const body = await readJson(req);
+    const payload = validateTransactionPayload({ ...existing, ...body });
+    if (payload.error) {
+      sendJson(res, 400, { error: payload.error });
+      return;
+    }
+
+    const duplicateInfo = body.duplicate_flag === "resolved"
+      ? { flag: "resolved", reference: existing.duplicate_reference || "" }
+      : detectNearDuplicate(payload, id);
+
+    db.prepare(`
+      UPDATE transactions
+      SET txn_type = ?, txn_date = ?, posted_date = ?, amount = ?, category_id = ?,
+          subcategory_id = ?, account_id = ?, description = ?, note = ?,
+          duplicate_flag = ?, duplicate_reference = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(
+      payload.txnType,
+      payload.txnDate,
+      payload.postedDate,
+      payload.amount,
+      payload.categoryId,
+      payload.subcategoryId,
+      payload.accountId,
+      payload.description,
+      payload.note,
+      duplicateInfo.flag,
+      duplicateInfo.reference,
+      id
+    );
+
+    sendJson(res, 200, { transaction: fetchTransactionById(id) });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/export.csv") {
+    const result = fetchTransactions(url.searchParams);
+    const rows = [
+      ["Date", "Type", "Amount", "Category", "Sub-category", "Account", "Description", "Note", "Flag"],
+      ...result.transactions.map((txn) => [
+        txn.txnDate,
+        txn.txnType,
+        txn.amount.toFixed(2),
+        txn.categoryName || "",
+        txn.subcategoryName || "",
+        txn.accountDisplay || "",
+        txn.description || "",
+        txn.note || "",
+        txn.duplicateFlag || ""
+      ])
+    ];
+
+    const csv = rows.map((row) => row.map(csvEscape).join(",")).join("\n");
+    res.writeHead(200, {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="finance-tracker-export.csv"`
+    });
+    res.end(csv);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/summary") {
+    sendJson(res, 200, buildSummary(fetchTransactions(url.searchParams).transactions));
+    return;
+  }
+
+  sendJson(res, 404, { error: "Not found." });
+}
+
+async function serveStatic(req, res, url) {
+  let targetPath = url.pathname === "/" ? "/index.html" : url.pathname;
+  const normalized = path.normalize(targetPath).replace(/^(\.\.[/\\])+/, "");
+  const filePath = path.join(publicDir, normalized);
+
+  if (!filePath.startsWith(publicDir)) {
+    sendText(res, 403, "Forbidden");
+    return;
+  }
+
+  const fallback = path.join(publicDir, "index.html");
+  const candidate = existsSync(filePath) ? filePath : fallback;
+  const fileStat = await stat(candidate);
+
+  if (!fileStat.isFile()) {
+    sendText(res, 404, "Not found");
+    return;
+  }
+
+  const contentType = getContentType(candidate);
+  res.writeHead(200, { "Content-Type": contentType });
+  createReadStream(candidate).pipe(res);
+}
+
+function hasAnyUser() {
+  return db.prepare("SELECT COUNT(*) AS count FROM users").get().count > 0;
+}
+
+function getCurrentUser(session) {
+  if (!session) {
+    return null;
+  }
+
+  return db.prepare("SELECT id, username FROM users WHERE id = ?").get(session.userId) || null;
+}
+
+function getSession(req) {
+  const cookies = parseCookies(req.headers.cookie || "");
+  const sessionId = cookies.session;
+  if (!sessionId) {
+    return null;
+  }
+
+  return sessions.get(sessionId) || null;
+}
+
+function createSession(res, user) {
+  const sessionId = randomUUID();
+  sessions.set(sessionId, { id: sessionId, userId: user.id, createdAt: Date.now() });
+  res.setHeader("Set-Cookie", `session=${sessionId}; HttpOnly; Path=/; SameSite=Lax`);
+}
+
+function destroySession(req, res) {
+  const cookies = parseCookies(req.headers.cookie || "");
+  if (cookies.session) {
+    sessions.delete(cookies.session);
+  }
+  res.setHeader("Set-Cookie", "session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax");
+}
+
+function parseCookies(cookieHeader) {
+  return Object.fromEntries(
+    cookieHeader
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const [key, ...rest] = part.split("=");
+        return [key, decodeURIComponent(rest.join("="))];
+      })
+  );
+}
+
+async function readJson(req) {
+  const chunks = [];
+  for await (const chunk of req) {
+    chunks.push(chunk);
+  }
+  if (!chunks.length) {
+    return {};
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function sendJson(res, statusCode, payload) {
+  res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(payload));
+}
+
+function sendText(res, statusCode, text) {
+  res.writeHead(statusCode, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end(text);
+}
+
+function getContentType(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const types = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8"
+  };
+  return types[ext] || "application/octet-stream";
+}
+
+function sanitizeText(value, maxLength) {
+  return String(value || "").trim().slice(0, maxLength);
+}
+
+function hashPassword(password, salt = randomUUID()) {
+  const hash = pbkdf2Sync(password, salt, 120000, 64, "sha512").toString("hex");
+  return { hash, salt };
+}
+
+function verifyPassword(password, salt, expectedHash) {
+  const actual = pbkdf2Sync(password, salt, 120000, 64, "sha512").toString("hex");
+  return timingSafeEqual(Buffer.from(actual, "hex"), Buffer.from(expectedHash, "hex"));
+}
+
+function validateCategoryPayload(input) {
+  const name = sanitizeText(input.name, 40);
+  const icon = sanitizeText(input.icon || "shapes", 40) || "shapes";
+  const parentId = input.parentId ? Number(input.parentId) : null;
+
+  if (!name) {
+    return { error: "Category name is required." };
+  }
+
+  if (parentId) {
+    const parent = db.prepare("SELECT id, parent_id FROM categories WHERE id = ?").get(parentId);
+    if (!parent || parent.parent_id !== null) {
+      return { error: "Sub-categories can only be created under a top-level category." };
+    }
+  }
+
+  return { name, icon, parentId };
+}
+
+function validateAccountPayload(input) {
+  const name = sanitizeText(input.name, 40);
+  const last4 = sanitizeText(input.last4, 4);
+
+  if (!name) {
+    return { error: "Account name is required." };
+  }
+
+  if (last4 && !/^\d{4}$/.test(last4)) {
+    return { error: "Last 4 digits must be exactly 4 digits when provided." };
+  }
+
+  return { name, last4: last4 || null };
+}
+
+function validateTransactionPayload(input) {
+  const txnType = ["debit", "credit", "transfer"].includes(input.txnType || input.txn_type)
+    ? (input.txnType || input.txn_type)
+    : null;
+  const txnDate = sanitizeText(input.txnDate || input.txn_date, 10);
+  const postedDateRaw = sanitizeText(input.postedDate || input.posted_date, 10);
+  const postedDate = postedDateRaw || null;
+  const amount = Number(input.amount);
+  const categoryId = input.categoryId ? Number(input.categoryId) : null;
+  const subcategoryId = input.subcategoryId ? Number(input.subcategoryId) : null;
+  const accountId = input.accountId ? Number(input.accountId) : null;
+  const description = sanitizeText(input.description, 120);
+  const note = sanitizeText(input.note, 70);
+
+  if (!txnType) {
+    return { error: "Transaction type is required." };
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(txnDate)) {
+    return { error: "Date must be in YYYY-MM-DD format." };
+  }
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return { error: "Amount must be greater than 0." };
+  }
+
+  if (note.length > 70) {
+    return { error: "Note cannot be longer than 70 characters." };
+  }
+
+  if ((txnType === "debit" || txnType === "credit") && !categoryId) {
+    return { error: "Category is required for debit and credit transactions." };
+  }
+
+  if (categoryId) {
+    const category = db.prepare("SELECT id, parent_id FROM categories WHERE id = ?").get(categoryId);
+    if (!category || category.parent_id !== null) {
+      return { error: "Category must be a top-level category." };
+    }
+  }
+
+  if (subcategoryId) {
+    const subcategory = db.prepare("SELECT id, parent_id FROM categories WHERE id = ?").get(subcategoryId);
+    if (!subcategory || !subcategory.parent_id || subcategory.parent_id !== categoryId) {
+      return { error: "Sub-category must belong to the selected category." };
+    }
+  }
+
+  if (accountId) {
+    const account = db.prepare("SELECT id FROM accounts WHERE id = ?").get(accountId);
+    if (!account) {
+      return { error: "Selected account does not exist." };
+    }
+  }
+
+  return {
+    txnType,
+    txnDate,
+    postedDate,
+    amount,
+    categoryId,
+    subcategoryId,
+    accountId,
+    description,
+    note
+  };
+}
+
+function detectNearDuplicate(payload, excludeId = null) {
+  if (!payload.categoryId) {
+    return { flag: "none", reference: "" };
+  }
+
+  const candidates = db.prepare(`
+    SELECT id, amount
+    FROM transactions
+    WHERE txn_date = ?
+      AND category_id = ?
+      ${excludeId ? "AND id != ?" : ""}
+    ORDER BY id DESC
+  `);
+
+  const rows = excludeId
+    ? candidates.all(payload.txnDate, payload.categoryId, excludeId)
+    : candidates.all(payload.txnDate, payload.categoryId);
+
+  const match = rows.find((row) => Math.abs(Number(row.amount) - payload.amount) <= nearDuplicateTolerance);
+  if (!match) {
+    return { flag: "none", reference: "" };
+  }
+
+  return {
+    flag: "near_duplicate",
+    reference: `Possible overlap with transaction #${match.id}`
+  };
+}
+
+function fetchCategories() {
+  const rows = db.prepare(`
+    SELECT id, name, icon, parent_id AS parentId, created_at AS createdAt, updated_at AS updatedAt
+    FROM categories
+    ORDER BY COALESCE(parent_id, id), parent_id IS NOT NULL, name COLLATE NOCASE ASC
+  `).all();
+
+  const parents = [];
+  const byParent = new Map();
+
+  for (const row of rows) {
+    if (row.parentId === null) {
+      parents.push({ ...row, subcategories: [] });
+    } else {
+      const list = byParent.get(row.parentId) || [];
+      list.push(row);
+      byParent.set(row.parentId, list);
+    }
+  }
+
+  for (const parent of parents) {
+    parent.subcategories = byParent.get(parent.id) || [];
+  }
+
+  return parents;
+}
+
+function fetchTransactionById(id) {
+  return db.prepare(`
+    SELECT
+      t.id,
+      t.txn_type AS txnType,
+      t.txn_date AS txnDate,
+      t.posted_date AS postedDate,
+      t.amount,
+      t.description,
+      t.note,
+      t.duplicate_flag AS duplicateFlag,
+      t.duplicate_reference AS duplicateReference,
+      c.id AS categoryId,
+      c.name AS categoryName,
+      s.id AS subcategoryId,
+      s.name AS subcategoryName,
+      a.id AS accountId,
+      CASE
+        WHEN a.last4 IS NOT NULL AND a.last4 != '' THEN a.name || ' (' || a.last4 || ')'
+        WHEN a.name IS NOT NULL THEN a.name
+        ELSE ''
+      END AS accountDisplay
+    FROM transactions t
+    LEFT JOIN categories c ON c.id = t.category_id
+    LEFT JOIN categories s ON s.id = t.subcategory_id
+    LEFT JOIN accounts a ON a.id = t.account_id
+    WHERE t.id = ?
+  `).get(id);
+}
+
+function fetchTransactions(searchParams) {
+  const filters = {
+    startDate: searchParams.get("startDate") || defaultStartDate(),
+    endDate: searchParams.get("endDate") || defaultEndDate(),
+    categoryId: searchParams.get("categoryId") || "",
+    subcategoryId: searchParams.get("subcategoryId") || "",
+    txnType: searchParams.get("txnType") || "all",
+    accountId: searchParams.get("accountId") || "",
+    query: (searchParams.get("query") || "").trim()
+  };
+
+  const conditions = ["t.txn_date BETWEEN ? AND ?"];
+  const params = [filters.startDate, filters.endDate];
+
+  if (filters.categoryId) {
+    conditions.push("t.category_id = ?");
+    params.push(Number(filters.categoryId));
+  }
+
+  if (filters.subcategoryId) {
+    conditions.push("t.subcategory_id = ?");
+    params.push(Number(filters.subcategoryId));
+  }
+
+  if (filters.txnType && filters.txnType !== "all") {
+    conditions.push("t.txn_type = ?");
+    params.push(filters.txnType);
+  }
+
+  if (filters.accountId) {
+    conditions.push("t.account_id = ?");
+    params.push(Number(filters.accountId));
+  }
+
+  if (filters.query) {
+    conditions.push("(LOWER(t.note) LIKE ? OR LOWER(t.description) LIKE ?)");
+    params.push(`%${filters.query.toLowerCase()}%`, `%${filters.query.toLowerCase()}%`);
+  }
+
+  const statement = db.prepare(`
+    SELECT
+      t.id,
+      t.txn_type AS txnType,
+      t.txn_date AS txnDate,
+      t.posted_date AS postedDate,
+      t.amount,
+      t.description,
+      t.note,
+      t.duplicate_flag AS duplicateFlag,
+      t.duplicate_reference AS duplicateReference,
+      c.id AS categoryId,
+      c.name AS categoryName,
+      s.id AS subcategoryId,
+      s.name AS subcategoryName,
+      a.id AS accountId,
+      CASE
+        WHEN a.last4 IS NOT NULL AND a.last4 != '' THEN a.name || ' (' || a.last4 || ')'
+        WHEN a.name IS NOT NULL THEN a.name
+        ELSE ''
+      END AS accountDisplay
+    FROM transactions t
+    LEFT JOIN categories c ON c.id = t.category_id
+    LEFT JOIN categories s ON s.id = t.subcategory_id
+    LEFT JOIN accounts a ON a.id = t.account_id
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY t.txn_date DESC, t.id DESC
+  `);
+
+  const transactions = statement.all(...params);
+  return {
+    filters,
+    transactions,
+    summary: buildSummary(transactions)
+  };
+}
+
+function buildSummary(transactions) {
+  const summary = {
+    debit: 0,
+    credit: 0,
+    transfer: 0,
+    count: transactions.length
+  };
+
+  for (const txn of transactions) {
+    summary[txn.txnType] += Number(txn.amount);
+  }
+
+  return summary;
+}
+
+function defaultStartDate() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30);
+  return toDateInputValue(start);
+}
+
+function defaultEndDate() {
+  return toDateInputValue(new Date());
+}
+
+function toDateInputValue(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function csvEscape(value) {
+  const stringValue = String(value ?? "");
+  if (/[",\n]/.test(stringValue)) {
+    return `"${stringValue.replaceAll('"', '""')}"`;
+  }
+  return stringValue;
+}

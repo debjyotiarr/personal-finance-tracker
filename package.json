@@ -1,0 +1,10 @@
+{
+  "name": "finance-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local-first personal finance tracker",
+  "scripts": {
+    "start": "node server.mjs"
+  }
+}

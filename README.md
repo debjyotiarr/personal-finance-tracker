@@ -4,6 +4,45 @@ FinanceTracker is a local-first personal expense tracker designed for single-use
 
 The initial release is intended to run as a local web app in the browser. The architecture should make it straightforward to package later as a desktop app without a major rewrite.
 
+## Current Build Status
+
+The repository now includes a working first-version foundation with:
+
+- Local Node.js server with no external runtime dependencies
+- Local SQLite database initialization
+- First-run single-user account setup and login
+- Starter categories
+- Account creation
+- Manual transaction entry and editing
+- Filterable dashboard
+- Near-duplicate flagging and manual de-flagging
+- CSV export for the filtered transaction table
+
+Not yet implemented in this first runnable slice:
+
+- CSV/PDF statement parsing and review flow
+- Formatted PDF export
+- Category icon picker and custom logo upload UI
+- Desktop packaging
+
+## Quick Start
+
+### Requirements
+
+- Node.js 24 or later
+
+### Run Locally
+
+```bash
+node server.mjs
+```
+
+Then open:
+
+- `http://127.0.0.1:3000`
+
+On first launch, create the single local username and password for the app.
+
 ## Goals
 
 - Keep all data stored locally on the user's machine

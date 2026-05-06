@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FinanceTracker</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <div class="shell">
+        <aside class="sidebar">
+          <div>
+            <p class="eyebrow">Local-first finance</p>
+            <h1>FinanceTracker</h1>
+            <p class="muted">
+              Track credits, debits, and transfers on your machine with a clean,
+              readable workflow.
+            </p>
+          </div>
+          <nav class="nav" id="nav"></nav>
+          <div class="sidebar-footer">
+            <div id="user-pill" class="user-pill hidden"></div>
+            <button id="logout-button" class="ghost hidden">Log out</button>
+          </div>
+        </aside>
+
+        <main class="content">
+          <section id="auth-view" class="panel hidden"></section>
+          <section id="dashboard-view" class="panel hidden"></section>
+          <section id="categories-view" class="panel hidden"></section>
+          <section id="accounts-view" class="panel hidden"></section>
+          <section id="imports-view" class="panel hidden"></section>
+          <section id="reports-view" class="panel hidden"></section>
+        </main>
+      </div>
+    </div>
+
+    <template id="auth-template">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Secure local access</p>
+          <h2 id="auth-title"></h2>
+          <p class="muted" id="auth-copy"></p>
+        </div>
+      </div>
+
+      <form id="auth-form" class="stack">
+        <label>
+          Username
+          <input name="username" maxlength="40" autocomplete="username" required />
+        </label>
+        <label>
+          Password
+          <input
+            type="password"
+            name="password"
+            minlength="8"
+            autocomplete="current-password"
+            required
+          />
+        </label>
+        <button type="submit" class="primary" id="auth-submit"></button>
+        <p class="inline-error" id="auth-error"></p>
+      </form>
+    </template>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+  </html>
