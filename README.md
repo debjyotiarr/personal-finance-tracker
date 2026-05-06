@@ -710,3 +710,4 @@ The next implementation step should be to scaffold the project and lock in the c
 - PDF generation library
 
 Once those are chosen, the repository can be initialized directly against this blueprint.
+# personal-finance-tracker
