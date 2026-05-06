@@ -366,8 +366,14 @@ function renderAccounts() {
         ${
           state.accounts.length
             ? `<table class="simple-table">
-                <thead><tr><th>Name</th><th>Last 4</th></tr></thead>
-                <tbody>${state.accounts.map((account) => `<tr><td>${escapeHtml(account.name)}</td><td>${escapeHtml(account.last4 || "")}</td></tr>`).join("")}</tbody>
+                <thead><tr><th>Name</th><th>Last 4</th><th></th></tr></thead>
+                <tbody>${state.accounts.map((account) => `
+                  <tr>
+                    <td>${escapeHtml(account.name)}</td>
+                    <td>${escapeHtml(account.last4 || "")}</td>
+                    <td><button type="button" class="danger" data-delete-account="${account.id}">Delete</button></td>
+                  </tr>
+                `).join("")}</tbody>
               </table>`
             : `<div class="empty-state">No accounts yet. Add one for better tracking across bank statements and cash entries.</div>`
         }
@@ -376,6 +382,9 @@ function renderAccounts() {
   `;
 
   app.accountsView.querySelector("#account-form").addEventListener("submit", saveAccount);
+  app.accountsView.querySelectorAll("[data-delete-account]").forEach((button) => {
+    button.addEventListener("click", () => deleteAccount(Number(button.dataset.deleteAccount)));
+  });
 }
 
 function renderImports() {
@@ -613,6 +622,20 @@ async function saveAccount(event) {
     renderShell();
   } catch (error) {
     errorNode.textContent = error.message;
+  }
+}
+
+async function deleteAccount(id) {
+  try {
+    await api(`/api/accounts/${id}`, { method: "DELETE" });
+    const accountsPayload = await api("/api/accounts");
+    state.accounts = accountsPayload.accounts;
+    renderShell();
+  } catch (error) {
+    const errorNode = app.accountsView.querySelector("#account-error");
+    if (errorNode) {
+      errorNode.textContent = error.message;
+    }
   }
 }
 

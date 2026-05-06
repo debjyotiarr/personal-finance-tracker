@@ -2,16 +2,16 @@
   --bg: #f4f1ea;
   --panel: #fffdf8;
   --panel-strong: #fffaf0;
-  --line: #d8cfbf;
-  --line-strong: #b8aa92;
-  --text: #2b241c;
-  --muted: #6b6255;
-  --brand: #8f4e22;
-  --brand-strong: #6e3816;
+  --line: #c8d6e8;
+  --line-strong: #9fb6d4;
+  --text: #1f2d3d;
+  --muted: #5f7085;
+  --brand: #2b6cb0;
+  --brand-strong: #1d4f8a;
   --green: #236b4c;
-  --red: #9a412c;
-  --amber: #9d6b10;
-  --shadow: 0 18px 48px rgba(55, 35, 12, 0.08);
+  --red: #b14545;
+  --amber: #a06a12;
+  --shadow: 0 18px 48px rgba(31, 65, 114, 0.1);
   --radius-lg: 22px;
   --radius-md: 16px;
   --radius-sm: 10px;
@@ -25,8 +25,8 @@
 body {
   margin: 0;
   background:
-    radial-gradient(circle at top left, rgba(218, 182, 120, 0.25), transparent 28%),
-    linear-gradient(180deg, #faf6ef 0%, var(--bg) 100%);
+    radial-gradient(circle at top left, rgba(122, 162, 216, 0.28), transparent 28%),
+    linear-gradient(180deg, #f3f8ff 0%, #eaf1fb 100%);
   color: var(--text);
 }
 
@@ -53,8 +53,8 @@ button {
 
 .sidebar {
   padding: 28px 22px;
-  background: rgba(255, 249, 240, 0.88);
-  border-right: 1px solid rgba(184, 170, 146, 0.45);
+  background: rgba(245, 250, 255, 0.9);
+  border-right: 1px solid rgba(159, 182, 212, 0.45);
   backdrop-filter: blur(12px);
   display: flex;
   flex-direction: column;
@@ -102,7 +102,7 @@ button {
 
 .nav button.active {
   background: var(--panel);
-  border-color: rgba(143, 78, 34, 0.28);
+  border-color: rgba(43, 108, 176, 0.24);
   box-shadow: var(--shadow);
 }
 
@@ -115,7 +115,7 @@ button {
 .user-pill {
   padding: 12px 14px;
   border-radius: var(--radius-md);
-  background: rgba(143, 78, 34, 0.08);
+  background: rgba(43, 108, 176, 0.1);
   color: var(--brand-strong);
   font-weight: 600;
 }
@@ -125,8 +125,8 @@ button {
 }
 
 .panel {
-  background: rgba(255, 253, 248, 0.9);
-  border: 1px solid rgba(184, 170, 146, 0.36);
+  background: rgba(252, 254, 255, 0.92);
+  border: 1px solid rgba(159, 182, 212, 0.34);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow);
   padding: 26px;
@@ -221,13 +221,13 @@ textarea {
 }
 
 .secondary {
-  background: rgba(143, 78, 34, 0.1);
+  background: rgba(43, 108, 176, 0.1);
   color: var(--brand-strong);
 }
 
 .ghost {
   background: transparent;
-  border-color: rgba(143, 78, 34, 0.22);
+  border-color: rgba(43, 108, 176, 0.22);
   color: var(--brand-strong);
 }
 
@@ -252,8 +252,8 @@ textarea {
 .stat-card {
   padding: 18px;
   border-radius: var(--radius-md);
-  background: linear-gradient(180deg, rgba(255,255,255,0.95), rgba(255,249,240,0.95));
-  border: 1px solid rgba(184, 170, 146, 0.32);
+  background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(243,248,255,0.96));
+  border: 1px solid rgba(159, 182, 212, 0.32);
 }
 
 .stat-card .label {
@@ -278,7 +278,7 @@ textarea {
 .simple-table th,
 .simple-table td {
   padding: 12px 10px;
-  border-bottom: 1px solid rgba(216, 207, 191, 0.62);
+  border-bottom: 1px solid rgba(200, 214, 232, 0.7);
   text-align: left;
   vertical-align: top;
 }
@@ -337,7 +337,7 @@ textarea {
 }
 
 .empty-state {
-  border: 1px dashed rgba(184, 170, 146, 0.9);
+  border: 1px dashed rgba(159, 182, 212, 0.9);
   border-radius: var(--radius-md);
   padding: 24px;
   color: var(--muted);
@@ -351,10 +351,10 @@ textarea {
 }
 
 .category-card {
-  border: 1px solid rgba(216, 207, 191, 0.7);
+  border: 1px solid rgba(200, 214, 232, 0.8);
   border-radius: var(--radius-md);
   padding: 16px;
-  background: rgba(255, 255, 255, 0.86);
+  background: rgba(255, 255, 255, 0.9);
 }
 
 .category-card strong {
@@ -377,8 +377,8 @@ textarea {
 .report-card {
   padding: 18px;
   border-radius: var(--radius-md);
-  border: 1px solid rgba(216, 207, 191, 0.7);
-  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(200, 214, 232, 0.78);
+  background: rgba(255, 255, 255, 0.86);
 }
 
 @media (max-width: 1120px) {
@@ -393,6 +393,6 @@ textarea {
 
   .sidebar {
     border-right: none;
-    border-bottom: 1px solid rgba(184, 170, 146, 0.45);
+    border-bottom: 1px solid rgba(159, 182, 212, 0.45);
   }
 }

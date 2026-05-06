@@ -21,6 +21,7 @@ const defaultHost = process.env.HOST || "127.0.0.1";
 await ensureDirectories();
 const db = new DatabaseSync(dbPath);
 initializeDatabase(db);
+ensureAccountsSchema(db);
 seedStarterCategories(db);
 
 const server = createServer(async (req, res) => {
@@ -80,7 +81,7 @@ function initializeDatabase(database) {
 
     CREATE TABLE IF NOT EXISTS accounts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
       last4 TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -136,6 +137,56 @@ function seedStarterCategories(database) {
   for (const [name, icon] of starterCategories) {
     insert.run(name, icon);
   }
+}
+
+function ensureAccountsSchema(database) {
+  const tableSqlRow = database
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
+    .get();
+
+  if (!tableSqlRow?.sql) {
+    database.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_name_last4
+      ON accounts (name, IFNULL(last4, ''));
+    `);
+    return;
+  }
+
+  const needsMigration = tableSqlRow.sql.includes("name TEXT NOT NULL UNIQUE");
+  if (needsMigration) {
+    database.exec("PRAGMA foreign_keys = OFF;");
+    database.exec("BEGIN;");
+    try {
+      database.exec(`
+        ALTER TABLE accounts RENAME TO accounts_legacy;
+
+        CREATE TABLE accounts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          last4 TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        INSERT INTO accounts (id, name, last4, created_at, updated_at)
+        SELECT id, name, last4, created_at, updated_at
+        FROM accounts_legacy;
+
+        DROP TABLE accounts_legacy;
+      `);
+      database.exec("COMMIT;");
+    } catch (error) {
+      database.exec("ROLLBACK;");
+      database.exec("PRAGMA foreign_keys = ON;");
+      throw error;
+    }
+    database.exec("PRAGMA foreign_keys = ON;");
+  }
+
+  database.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_name_last4
+    ON accounts (name, IFNULL(last4, ''));
+  `);
 }
 
 async function handleApi(req, res, url) {
@@ -276,10 +327,19 @@ async function handleApi(req, res, url) {
       return;
     }
 
-    const inserted = db.prepare(`
-      INSERT INTO accounts (name, last4, updated_at)
-      VALUES (?, ?, CURRENT_TIMESTAMP)
-    `).run(payload.name, payload.last4);
+    let inserted;
+    try {
+      inserted = db.prepare(`
+        INSERT INTO accounts (name, last4, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+      `).run(payload.name, payload.last4);
+    } catch (error) {
+      if (isSqliteConstraintError(error)) {
+        sendJson(res, 400, { error: "An account with the same name and last 4 digits already exists." });
+        return;
+      }
+      throw error;
+    }
 
     const account = db.prepare("SELECT * FROM accounts WHERE id = ?").get(inserted.lastInsertRowid);
     sendJson(res, 201, { account });
@@ -301,12 +361,44 @@ async function handleApi(req, res, url) {
       return;
     }
 
-    db.prepare(`
-      UPDATE accounts
-      SET name = ?, last4 = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(payload.name, payload.last4, id);
+    try {
+      db.prepare(`
+        UPDATE accounts
+        SET name = ?, last4 = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(payload.name, payload.last4, id);
+    } catch (error) {
+      if (isSqliteConstraintError(error)) {
+        sendJson(res, 400, { error: "An account with the same name and last 4 digits already exists." });
+        return;
+      }
+      throw error;
+    }
 
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (req.method === "DELETE" && url.pathname.startsWith("/api/accounts/")) {
+    const id = Number(url.pathname.split("/").pop());
+    const existing = db.prepare("SELECT * FROM accounts WHERE id = ?").get(id);
+    if (!existing) {
+      sendJson(res, 404, { error: "Account not found." });
+      return;
+    }
+
+    const usage = db
+      .prepare("SELECT COUNT(*) AS count FROM transactions WHERE account_id = ?")
+      .get(id);
+
+    if (usage.count > 0) {
+      sendJson(res, 409, {
+        error: `This account is used by ${usage.count} transaction${usage.count === 1 ? "" : "s"}. Reassign or edit those transactions before deleting the account.`
+      });
+      return;
+    }
+
+    db.prepare("DELETE FROM accounts WHERE id = ?").run(id);
     sendJson(res, 200, { ok: true });
     return;
   }
@@ -577,6 +669,14 @@ function validateAccountPayload(input) {
     return { error: "Last 4 digits must be exactly 4 digits when provided." };
   }
 
+  const duplicate = db
+    .prepare("SELECT id FROM accounts WHERE name = ? AND IFNULL(last4, '') = ?")
+    .get(name, last4 || "");
+  const currentId = input.id ? Number(input.id) : null;
+  if (duplicate && duplicate.id !== currentId) {
+    return { error: "An account with the same name and last 4 digits already exists." };
+  }
+
   return { name, last4: last4 || null };
 }
 
@@ -845,4 +945,8 @@ function csvEscape(value) {
     return `"${stringValue.replaceAll('"', '""')}"`;
   }
   return stringValue;
+}
+
+function isSqliteConstraintError(error) {
+  return Boolean(error && typeof error.code === "string" && error.code.includes("SQLITE_CONSTRAINT"));
 }
