@@ -1,9 +1,11 @@
 import { createServer } from "node:http";
-import { readFile, stat, mkdir } from "node:fs/promises";
+import { readFile, stat, mkdir, writeFile } from "node:fs/promises";
 import { createReadStream, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID, pbkdf2Sync, timingSafeEqual } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { DatabaseSync } from "node:sqlite";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -17,6 +19,7 @@ const sessions = new Map();
 const nearDuplicateTolerance = 10;
 const defaultPort = Number(process.env.PORT || 3000);
 const defaultHost = process.env.HOST || "127.0.0.1";
+const execFileAsync = promisify(execFile);
 
 await ensureDirectories();
 const db = new DatabaseSync(dbPath);
@@ -565,6 +568,24 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/api/imports/pdf-preview") {
+    const body = await readJson(req);
+    const fileName = sanitizeText(body.fileName, 120) || "statement.pdf";
+    const fileContentBase64 = String(body.fileContentBase64 || "");
+    if (!fileContentBase64) {
+      sendJson(res, 400, { error: "No PDF data was provided." });
+      return;
+    }
+
+    try {
+      const preview = await buildPdfImportPreview(fileName, fileContentBase64);
+      sendJson(res, 200, preview);
+    } catch (error) {
+      sendJson(res, 400, { error: error.message || "Unable to read the PDF." });
+    }
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/imports/commit") {
     const body = await readJson(req);
     const rows = Array.isArray(body.rows) ? body.rows : [];
@@ -1042,6 +1063,123 @@ function summarizeImportPreview(rows) {
   });
 }
 
+async function buildPdfImportPreview(fileName, fileContentBase64) {
+  const tempId = randomUUID();
+  const pdfPath = path.join(uploadsDir, `${tempId}-${safeFileName(fileName)}`);
+  const pdfBytes = Buffer.from(fileContentBase64, "base64");
+  await writeFile(pdfPath, pdfBytes);
+
+  let extractedText = "";
+  try {
+    const { stdout } = await execFileAsync("/Users/marvin/anaconda3/bin/pdftotext", [pdfPath, "-"]);
+    extractedText = stdout;
+  } catch (error) {
+    throw new Error("Unable to read text from this PDF. For v1, the PDF must be text-based rather than scanned.");
+  }
+
+  const rows = parsePdfTransactions(extractedText);
+  if (!rows.length) {
+    throw new Error("The PDF text was extracted, but no transactions could be recognized yet. A Google Pay sample PDF will help tighten the parser.");
+  }
+
+  const previewRows = rows.map((row, index) => buildImportPreviewRow(row, index));
+  return {
+    fileName,
+    rows: previewRows,
+    summary: summarizeImportPreview(previewRows)
+  };
+}
+
+function parsePdfTransactions(text) {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  const transactions = [];
+  let currentDate = "";
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const parsedDate = parseFlexibleDate(line);
+    if (parsedDate) {
+      currentDate = parsedDate;
+      continue;
+    }
+
+    if (!containsAmount(line)) {
+      continue;
+    }
+
+    const amount = parseAmount(line);
+    if (!amount) {
+      continue;
+    }
+
+    const context = [lines[index - 1], line, lines[index + 1]].filter(Boolean).join(" ");
+    const description = extractPdfDescription(lines, index);
+    const txnType = inferPdfTransactionType(context);
+    const accountLast4 = extractLast4(context);
+
+    transactions.push({
+      Date: currentDate,
+      Description: description,
+      Amount: amount,
+      Type: txnType,
+      Account: accountLast4
+    });
+  }
+
+  return dedupePdfRows(transactions);
+}
+
+function containsAmount(value) {
+  return /(?:₹|rs\.?|inr)?\s*-?\d[\d,]*(?:\.\d{1,2})?/i.test(String(value || ""));
+}
+
+function extractPdfDescription(lines, index) {
+  const current = lines[index] || "";
+  const prev = lines[index - 1] || "";
+  const next = lines[index + 1] || "";
+  const descriptionCandidates = [prev, current, next]
+    .map((line) => line.replace(/(?:₹|rs\.?|inr)?\s*-?\d[\d,]*(?:\.\d{1,2})?/ig, "").trim())
+    .filter((line) => /[A-Za-z]{3,}/.test(line));
+
+  return sanitizeText(descriptionCandidates[0] || current, 120);
+}
+
+function inferPdfTransactionType(text) {
+  const normalized = String(text || "").toLowerCase();
+  if (/(received|credited|deposit|cashback|refund|salary|collected)/.test(normalized)) {
+    return "credit";
+  }
+  if (/(paid|sent|debited|spent|purchase|to )/.test(normalized)) {
+    return "debit";
+  }
+  return "debit";
+}
+
+function extractLast4(text) {
+  const match = String(text || "").match(/(?:x{2,}|[*]{2,}|ending|acct|account)?\s*(\d{4})(?!.*\d)/i);
+  return match ? match[1] : "";
+}
+
+function dedupePdfRows(rows) {
+  const seen = new Set();
+  return rows.filter((row) => {
+    const key = `${row.Date}|${row.Amount}|${row.Type}|${normalizeDescription(row.Description)}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function safeFileName(fileName) {
+  return String(fileName || "statement.pdf").replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
 function normalizeImportRow(sourceRow) {
   const entries = Object.entries(sourceRow || {});
   const byKey = new Map(entries.map(([key, value]) => [normalizeHeader(key), String(value ?? "").trim()]));
@@ -1145,9 +1283,16 @@ function parseFlexibleDate(value) {
     }
   }
 
-  const asDate = new Date(raw);
-  if (!Number.isNaN(asDate.getTime())) {
-    return localDateString(asDate);
+  const clearlyDateLike =
+    /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(raw) ||
+    /^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}$/.test(raw) ||
+    /^\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}$/.test(raw);
+
+  if (clearlyDateLike) {
+    const asDate = new Date(raw);
+    if (!Number.isNaN(asDate.getTime())) {
+      return localDateString(asDate);
+    }
   }
 
   return "";
@@ -1214,14 +1359,19 @@ function parseAmount(value) {
     return 0;
   }
 
-  const cleaned = raw
+  const normalized = raw
     .replace(/,/g, "")
-    .replace(/₹/g, "")
-    .replace(/[A-Za-z]/g, "")
     .replace(/\((.+)\)/, "-$1")
+    .replace(/[₹'’`]/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
 
-  const amount = Number(cleaned);
+  const match = normalized.match(/-?\d+(?:\.\d{1,2})?/);
+  if (!match) {
+    return 0;
+  }
+
+  const amount = Number(match[0]);
   if (!Number.isFinite(amount)) {
     return 0;
   }

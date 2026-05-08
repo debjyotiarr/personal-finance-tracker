@@ -472,15 +472,15 @@ function renderImports() {
       <div class="split">
         <div class="stack">
           <h3>Choose CSV</h3>
-          <label>Select a bank or Google Pay CSV
-            <input id="imports-file-input" type="file" accept=".csv,text/csv" />
+          <label>Select a bank or Google Pay CSV or PDF
+            <input id="imports-file-input" type="file" accept=".csv,.pdf,text/csv,application/pdf" />
           </label>
           <div class="upload-callout">
-            <strong>${state.selectedUploadName ? escapeHtml(state.selectedUploadName) : "No CSV selected yet"}</strong>
-            <span class="muted">CSV import is live now. PDF parsing can follow next.</span>
+            <strong>${state.selectedUploadName ? escapeHtml(state.selectedUploadName) : "No file selected yet"}</strong>
+            <span class="muted">CSV import is fully supported. PDF import currently targets text-based statements such as Google Pay exports.</span>
           </div>
           <div class="button-row">
-            <button type="button" class="primary" id="preview-import" ${state.importFile ? "" : "disabled"}>Preview CSV</button>
+            <button type="button" class="primary" id="preview-import" ${state.importFile ? "" : "disabled"}>Preview file</button>
             <button type="button" class="ghost" id="clear-import" ${state.importFile || preview ? "" : "disabled"}>Clear</button>
           </div>
           <p class="inline-error" id="import-error"></p>
@@ -947,20 +947,32 @@ async function previewImportCsv() {
       throw new Error("Choose a CSV file first.");
     }
 
-    const csvText = await state.importFile.text();
-    const rawRows = parseCsvText(csvText);
-    const rowObjects = csvRowsToObjects(rawRows);
-    if (!rowObjects.length) {
-      throw new Error("The CSV did not contain any data rows.");
-    }
+    if (state.importFile.name.toLowerCase().endsWith(".pdf") || state.importFile.type === "application/pdf") {
+      const fileBuffer = await state.importFile.arrayBuffer();
+      const fileContentBase64 = arrayBufferToBase64(fileBuffer);
+      state.importPreview = await api("/api/imports/pdf-preview", {
+        method: "POST",
+        body: JSON.stringify({
+          fileName: state.importFile.name,
+          fileContentBase64
+        })
+      });
+    } else {
+      const csvText = await state.importFile.text();
+      const rawRows = parseCsvText(csvText);
+      const rowObjects = csvRowsToObjects(rawRows);
+      if (!rowObjects.length) {
+        throw new Error("The CSV did not contain any data rows.");
+      }
 
-    state.importPreview = await api("/api/imports/preview", {
-      method: "POST",
-      body: JSON.stringify({
-        fileName: state.importFile.name,
-        rows: rowObjects
-      })
-    });
+      state.importPreview = await api("/api/imports/preview", {
+        method: "POST",
+        body: JSON.stringify({
+          fileName: state.importFile.name,
+          rows: rowObjects
+        })
+      });
+    }
     renderImports();
   } catch (error) {
     if (errorNode) {
@@ -1292,6 +1304,17 @@ function csvRowsToObjects(rows) {
     });
     return row;
   }).filter((row) => Object.values(row).some((value) => String(value).trim() !== ""));
+}
+
+function arrayBufferToBase64(buffer) {
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
 }
 
 function emptyHomeData() {
