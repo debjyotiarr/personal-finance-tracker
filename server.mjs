@@ -313,6 +313,11 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/home") {
+    sendJson(res, 200, fetchHomeData());
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/api/categories") {
     sendJson(res, 200, { categories: fetchCategories() });
     return;
@@ -540,6 +545,105 @@ async function handleApi(req, res, url) {
     );
 
     sendJson(res, 200, { transaction: fetchTransactionById(id) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/imports/preview") {
+    const body = await readJson(req);
+    const rows = Array.isArray(body.rows) ? body.rows : [];
+    if (!rows.length) {
+      sendJson(res, 400, { error: "No CSV rows were provided." });
+      return;
+    }
+
+    const previewRows = rows.map((row, index) => buildImportPreviewRow(row, index));
+    sendJson(res, 200, {
+      fileName: sanitizeText(body.fileName, 120),
+      rows: previewRows,
+      summary: summarizeImportPreview(previewRows)
+    });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/imports/commit") {
+    const body = await readJson(req);
+    const rows = Array.isArray(body.rows) ? body.rows : [];
+    if (!rows.length) {
+      sendJson(res, 400, { error: "No import rows were provided." });
+      return;
+    }
+
+    const imported = [];
+    const skipped = [];
+    const errors = [];
+
+    for (const [index, row] of rows.entries()) {
+      if (!row.includeInImport) {
+        skipped.push({ rowIndex: row.rowIndex ?? index + 1, reason: "Excluded from import" });
+        continue;
+      }
+
+      const payload = validateTransactionPayload({
+        txnType: row.txnType,
+        txnDate: row.txnDate,
+        amount: row.amount,
+        categoryId: row.categoryId,
+        subcategoryId: row.subcategoryId,
+        accountId: row.accountId,
+        description: row.description,
+        note: row.note
+      });
+
+      if (payload.error) {
+        errors.push({ rowIndex: row.rowIndex ?? index + 1, error: payload.error });
+        continue;
+      }
+
+      const duplicateInfo = detectImportDuplicate(payload);
+      if (duplicateInfo.status === "hard_duplicate") {
+        skipped.push({
+          rowIndex: row.rowIndex ?? index + 1,
+          reason: duplicateInfo.reference || "Already present"
+        });
+        continue;
+      }
+
+      const nearDuplicateInfo = duplicateInfo.status === "near_duplicate"
+        ? { flag: "near_duplicate", reference: duplicateInfo.reference || "" }
+        : detectNearDuplicate(payload);
+
+      const inserted = db.prepare(`
+        INSERT INTO transactions (
+          txn_type, txn_date, posted_date, amount, category_id, subcategory_id,
+          account_id, description, note, duplicate_flag, duplicate_reference, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      `).run(
+        payload.txnType,
+        payload.txnDate,
+        payload.postedDate,
+        payload.amount,
+        payload.categoryId,
+        payload.subcategoryId,
+        payload.accountId,
+        payload.description,
+        payload.note,
+        nearDuplicateInfo.flag,
+        nearDuplicateInfo.reference
+      );
+
+      imported.push(fetchTransactionById(inserted.lastInsertRowid));
+    }
+
+    sendJson(res, 200, {
+      imported,
+      skipped,
+      errors,
+      counts: {
+        imported: imported.length,
+        skipped: skipped.length,
+        errors: errors.length
+      }
+    });
     return;
   }
 
@@ -835,6 +939,369 @@ function detectNearDuplicate(payload, excludeId = null) {
   };
 }
 
+function detectImportDuplicate(payload) {
+  const existingRows = db.prepare(`
+    SELECT
+      t.id,
+      t.amount,
+      t.txn_date AS txnDate,
+      t.txn_type AS txnType,
+      t.description,
+      t.account_id AS accountId,
+      t.category_id AS categoryId
+    FROM transactions t
+    WHERE t.txn_date = ?
+      AND t.txn_type = ?
+  `).all(payload.txnDate, payload.txnType);
+
+  const normalizedPayloadDescription = normalizeDescription(payload.description);
+
+  for (const row of existingRows) {
+    if (
+      Number(row.amount) === Number(payload.amount) &&
+      Number(row.accountId || 0) === Number(payload.accountId || 0) &&
+      normalizeDescription(row.description) === normalizedPayloadDescription
+    ) {
+      return {
+        status: "hard_duplicate",
+        reference: `Duplicate of transaction #${row.id}`
+      };
+    }
+  }
+
+  if (payload.categoryId) {
+    const near = existingRows.find((row) =>
+      Number(row.categoryId || 0) === Number(payload.categoryId || 0) &&
+      Math.abs(Number(row.amount) - Number(payload.amount)) <= nearDuplicateTolerance
+    );
+
+    if (near) {
+      return {
+        status: "near_duplicate",
+        reference: `Possible overlap with transaction #${near.id}`
+      };
+    }
+  }
+
+  return { status: "none", reference: "" };
+}
+
+function buildImportPreviewRow(sourceRow, index) {
+  const normalizedRow = normalizeImportRow(sourceRow);
+  const categorySuggestion = suggestCategory(normalizedRow.description, normalizedRow.txnType);
+  const accountSuggestion = suggestAccount(sourceRow, normalizedRow.description);
+  const payload = {
+    txnType: normalizedRow.txnType,
+    txnDate: normalizedRow.txnDate,
+    amount: normalizedRow.amount,
+    categoryId: categorySuggestion.categoryId,
+    subcategoryId: categorySuggestion.subcategoryId,
+    accountId: accountSuggestion.accountId,
+    description: normalizedRow.description,
+    note: normalizedRow.note
+  };
+  const duplicateInfo = normalizedRow.txnDate && normalizedRow.amount
+    ? detectImportDuplicate(payload)
+    : { status: "none", reference: "" };
+
+  return {
+    rowIndex: index + 1,
+    sourceSummary: normalizedRow.sourceSummary,
+    txnType: normalizedRow.txnType,
+    txnDate: normalizedRow.txnDate,
+    amount: normalizedRow.amount,
+    categoryId: categorySuggestion.categoryId,
+    subcategoryId: categorySuggestion.subcategoryId,
+    accountId: accountSuggestion.accountId,
+    description: normalizedRow.description,
+    note: normalizedRow.note,
+    duplicateStatus: duplicateInfo.status,
+    duplicateReference: duplicateInfo.reference,
+    includeInImport: duplicateInfo.status !== "hard_duplicate",
+    warnings: normalizedRow.warnings
+  };
+}
+
+function summarizeImportPreview(rows) {
+  return rows.reduce((summary, row) => {
+    summary.total += 1;
+    if (row.duplicateStatus === "hard_duplicate") {
+      summary.hardDuplicates += 1;
+    } else if (row.duplicateStatus === "near_duplicate") {
+      summary.nearDuplicates += 1;
+    }
+    if (!row.categoryId) {
+      summary.needsCategory += 1;
+    }
+    return summary;
+  }, {
+    total: 0,
+    hardDuplicates: 0,
+    nearDuplicates: 0,
+    needsCategory: 0
+  });
+}
+
+function normalizeImportRow(sourceRow) {
+  const entries = Object.entries(sourceRow || {});
+  const byKey = new Map(entries.map(([key, value]) => [normalizeHeader(key), String(value ?? "").trim()]));
+  const allValues = entries.map(([, value]) => String(value ?? "").trim()).filter(Boolean);
+
+  const txnDate = extractDateFromImport(byKey, allValues);
+  const typeAmount = extractTypeAndAmount(byKey, allValues);
+  const description = extractDescription(byKey, allValues);
+  const note = sanitizeText(extractNote(byKey), 70);
+  const sourceSummary = allValues.slice(0, 4).join(" | ").slice(0, 160);
+  const warnings = [];
+
+  if (!txnDate) {
+    warnings.push("Could not confidently read the transaction date.");
+  }
+  if (!typeAmount.amount) {
+    warnings.push("Could not confidently read the amount.");
+  }
+  if (!description) {
+    warnings.push("Description was blank, so categorization may need manual review.");
+  }
+
+  return {
+    txnDate: txnDate || "",
+    txnType: typeAmount.txnType || "debit",
+    amount: typeAmount.amount || 0,
+    description: sanitizeText(description, 120),
+    note,
+    sourceSummary,
+    warnings
+  };
+}
+
+function normalizeHeader(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function extractDateFromImport(byKey, allValues) {
+  const preferredKeys = [
+    "date",
+    "transaction date",
+    "txn date",
+    "posted date",
+    "value date"
+  ];
+
+  for (const key of preferredKeys) {
+    const parsed = parseFlexibleDate(byKey.get(key));
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  for (const value of allValues) {
+    const parsed = parseFlexibleDate(value);
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  return "";
+}
+
+function parseFlexibleDate(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  const normalized = raw.replace(/\./g, "/").replace(/-/g, "/");
+  const match = normalized.match(/^(\d{1,4})\/(\d{1,2})\/(\d{1,4})$/);
+  if (match) {
+    const first = Number(match[1]);
+    const second = Number(match[2]);
+    const third = Number(match[3]);
+
+    let year;
+    let month;
+    let day;
+
+    if (String(first).length === 4) {
+      year = first;
+      month = second;
+      day = third;
+    } else if (String(third).length === 4) {
+      year = third;
+      if (first > 12) {
+        day = first;
+        month = second;
+      } else {
+        month = first;
+        day = second;
+      }
+    }
+
+    if (year && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    }
+  }
+
+  const asDate = new Date(raw);
+  if (!Number.isNaN(asDate.getTime())) {
+    return localDateString(asDate);
+  }
+
+  return "";
+}
+
+function extractTypeAndAmount(byKey, allValues) {
+  const debitKeys = ["debit", "withdrawal", "withdrawn", "paid", "money out"];
+  const creditKeys = ["credit", "deposit", "received", "money in"];
+
+  for (const key of debitKeys) {
+    const value = byKey.get(key);
+    const amount = parseAmount(value);
+    if (amount > 0) {
+      return { txnType: "debit", amount };
+    }
+  }
+
+  for (const key of creditKeys) {
+    const value = byKey.get(key);
+    const amount = parseAmount(value);
+    if (amount > 0) {
+      return { txnType: "credit", amount };
+    }
+  }
+
+  const drcr = normalizeHeader(byKey.get("type") || byKey.get("dr cr") || byKey.get("drcr"));
+  const amountValue = parseAmount(
+    byKey.get("amount") ||
+    byKey.get("transaction amount") ||
+    byKey.get("value")
+  );
+
+  if (amountValue > 0) {
+    if (drcr.includes("cr") || drcr.includes("credit")) {
+      return { txnType: "credit", amount: amountValue };
+    }
+    if (drcr.includes("dr") || drcr.includes("debit")) {
+      return { txnType: "debit", amount: amountValue };
+    }
+    return { txnType: inferTypeFromValues(allValues), amount: amountValue };
+  }
+
+  for (const value of allValues) {
+    const amount = parseAmount(value);
+    if (amount > 0) {
+      return { txnType: inferTypeFromValues(allValues), amount };
+    }
+  }
+
+  return { txnType: inferTypeFromValues(allValues), amount: 0 };
+}
+
+function inferTypeFromValues(allValues) {
+  const joined = allValues.join(" ").toLowerCase();
+  if (/(salary|interest|refund|received|credit|deposit)/.test(joined)) {
+    return "credit";
+  }
+  return "debit";
+}
+
+function parseAmount(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return 0;
+  }
+
+  const cleaned = raw
+    .replace(/,/g, "")
+    .replace(/₹/g, "")
+    .replace(/[A-Za-z]/g, "")
+    .replace(/\((.+)\)/, "-$1")
+    .trim();
+
+  const amount = Number(cleaned);
+  if (!Number.isFinite(amount)) {
+    return 0;
+  }
+
+  return Math.abs(amount);
+}
+
+function extractDescription(byKey, allValues) {
+  const preferredKeys = [
+    "description",
+    "narration",
+    "remarks",
+    "merchant",
+    "details",
+    "particulars",
+    "transaction remarks",
+    "upi id"
+  ];
+
+  for (const key of preferredKeys) {
+    const value = sanitizeText(byKey.get(key), 120);
+    if (value) {
+      return value;
+    }
+  }
+
+  return sanitizeText(allValues.find((value) => /[A-Za-z]{3,}/.test(value)) || "", 120);
+}
+
+function extractNote(byKey) {
+  return byKey.get("note") || byKey.get("notes") || "";
+}
+
+function suggestCategory(description, txnType) {
+  const topLevelCategories = fetchCategories();
+  const categoryByName = new Map(topLevelCategories.map((category) => [category.name.toLowerCase(), category]));
+  const text = normalizeDescription(description);
+
+  if (txnType === "credit") {
+    return { categoryId: categoryByName.get("income")?.id || null, subcategoryId: null };
+  }
+
+  const keywordMap = [
+    { keywords: ["swiggy", "zomato", "cafe", "restaurant", "lunch", "dinner", "food"], category: "Food" },
+    { keywords: ["grocery", "grofers", "blinkit", "instamart", "supermarket"], category: "Groceries" },
+    { keywords: ["uber", "ola", "metro", "fuel", "petrol", "diesel", "transport"], category: "Transport" },
+    { keywords: ["electricity", "bill", "broadband", "rent", "water"], category: "Bills" },
+    { keywords: ["amazon", "flipkart", "mall", "shopping"], category: "Shopping" },
+    { keywords: ["pharmacy", "clinic", "hospital", "medic"], category: "Health" },
+    { keywords: ["netflix", "spotify", "movie", "bookmyshow"], category: "Entertainment" },
+    { keywords: ["flight", "hotel", "travel", "airbnb"], category: "Travel" },
+    { keywords: ["transfer", "self transfer"], category: "Transfers" }
+  ];
+
+  const match = keywordMap.find((entry) => entry.keywords.some((keyword) => text.includes(keyword)));
+  return {
+    categoryId: match ? categoryByName.get(match.category.toLowerCase())?.id || null : categoryByName.get("miscellaneous")?.id || null,
+    subcategoryId: null
+  };
+}
+
+function suggestAccount(sourceRow, description) {
+  const sourceText = `${Object.values(sourceRow || {}).join(" ")} ${description}`.trim();
+  const last4Match = sourceText.match(/(\d{4})(?!.*\d)/);
+  if (!last4Match) {
+    return { accountId: null };
+  }
+
+  const account = db.prepare("SELECT id FROM accounts WHERE last4 = ? LIMIT 1").get(last4Match[1]);
+  return { accountId: account?.id || null };
+}
+
+function normalizeDescription(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function fetchCategories() {
   const rows = db.prepare(`
     SELECT id, name, icon, parent_id AS parentId, created_at AS createdAt, updated_at AS updatedAt
@@ -968,6 +1435,75 @@ function fetchTransactions(searchParams) {
   };
 }
 
+function fetchHomeData() {
+  const startDate = monthStartDate();
+  const endDate = monthEndDate();
+  const monthTransactions = db.prepare(`
+    SELECT
+      t.id,
+      t.txn_type AS txnType,
+      t.txn_date AS txnDate,
+      t.posted_date AS postedDate,
+      t.amount,
+      t.description,
+      t.note,
+      t.duplicate_flag AS duplicateFlag,
+      t.duplicate_reference AS duplicateReference,
+      c.id AS categoryId,
+      c.name AS categoryName,
+      s.id AS subcategoryId,
+      s.name AS subcategoryName,
+      a.id AS accountId,
+      CASE
+        WHEN a.last4 IS NOT NULL AND a.last4 != '' THEN a.name || ' (' || a.last4 || ')'
+        WHEN a.name IS NOT NULL THEN a.name
+        ELSE ''
+      END AS accountDisplay
+    FROM transactions t
+    LEFT JOIN categories c ON c.id = t.category_id
+    LEFT JOIN categories s ON s.id = t.subcategory_id
+    LEFT JOIN accounts a ON a.id = t.account_id
+    WHERE t.txn_date BETWEEN ? AND ?
+    ORDER BY t.txn_date DESC, t.id DESC
+  `).all(startDate, endDate);
+
+  const recentTransactions = db.prepare(`
+    SELECT
+      t.id,
+      t.txn_type AS txnType,
+      t.txn_date AS txnDate,
+      t.amount,
+      t.description,
+      t.note,
+      c.name AS categoryName,
+      s.name AS subcategoryName,
+      CASE
+        WHEN a.last4 IS NOT NULL AND a.last4 != '' THEN a.name || ' (' || a.last4 || ')'
+        WHEN a.name IS NOT NULL THEN a.name
+        ELSE ''
+      END AS accountDisplay
+    FROM transactions t
+    LEFT JOIN categories c ON c.id = t.category_id
+    LEFT JOIN categories s ON s.id = t.subcategory_id
+    LEFT JOIN accounts a ON a.id = t.account_id
+    ORDER BY t.txn_date DESC, t.id DESC
+    LIMIT 5
+  `).all();
+
+  const categoryBreakdown = buildCategoryBreakdown(monthTransactions);
+
+  return {
+    month: {
+      startDate,
+      endDate,
+      label: formatMonthLabel(startDate)
+    },
+    summary: buildSummary(monthTransactions),
+    categoryBreakdown,
+    recentTransactions
+  };
+}
+
 function buildSummary(transactions) {
   const summary = {
     debit: 0,
@@ -983,10 +1519,40 @@ function buildSummary(transactions) {
   return summary;
 }
 
+function buildCategoryBreakdown(transactions) {
+  const totals = new Map();
+  for (const txn of transactions) {
+    if (txn.txnType !== "debit") {
+      continue;
+    }
+    const key = txn.categoryName || "Uncategorized";
+    totals.set(key, (totals.get(key) || 0) + Number(txn.amount));
+  }
+
+  return [...totals.entries()]
+    .map(([name, amount]) => ({ name, amount }))
+    .sort((left, right) => right.amount - left.amount);
+}
+
 function defaultStartDate() {
   const now = new Date();
   const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30);
   return toDateInputValue(start);
+}
+
+function monthStartDate() {
+  const now = new Date();
+  return localDateString(new Date(now.getFullYear(), now.getMonth(), 1));
+}
+
+function monthEndDate() {
+  const now = new Date();
+  return localDateString(new Date(now.getFullYear(), now.getMonth() + 1, 0));
+}
+
+function formatMonthLabel(isoDate) {
+  const date = new Date(`${isoDate}T12:00:00`);
+  return new Intl.DateTimeFormat("en-IN", { month: "long", year: "numeric" }).format(date);
 }
 
 function defaultEndDate() {
@@ -994,7 +1560,14 @@ function defaultEndDate() {
 }
 
 function toDateInputValue(date) {
-  return date.toISOString().slice(0, 10);
+  return localDateString(date);
+}
+
+function localDateString(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function csvEscape(value) {

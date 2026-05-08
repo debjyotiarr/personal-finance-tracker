@@ -1,6 +1,7 @@
 const state = {
   bootstrap: null,
-  currentView: "dashboard",
+  currentView: "home",
+  homeData: null,
   categories: [],
   accounts: [],
   transactions: [],
@@ -17,10 +18,15 @@ const state = {
   editingTransactionId: null,
   transactionDraft: defaultTransactionDraft(),
   categoryDraft: { name: "", icon: "shapes", parentId: "" },
-  accountDraft: { name: "", last4: "" }
+  accountDraft: { name: "", last4: "" },
+  selectedUploadName: "",
+  importFile: null,
+  importPreview: null,
+  importResult: null
 };
 
 const navItems = [
+  { id: "home", label: "Home" },
   { id: "dashboard", label: "Dashboard" },
   { id: "categories", label: "Categories" },
   { id: "accounts", label: "Accounts" },
@@ -31,6 +37,7 @@ const navItems = [
 const app = {
   nav: document.querySelector("#nav"),
   authView: document.querySelector("#auth-view"),
+  homeView: document.querySelector("#home-view"),
   dashboardView: document.querySelector("#dashboard-view"),
   categoriesView: document.querySelector("#categories-view"),
   accountsView: document.querySelector("#accounts-view"),
@@ -49,7 +56,6 @@ async function bootstrap() {
   try {
     state.bootstrap = await api("/api/bootstrap");
     renderShell();
-
     if (state.bootstrap.user) {
       await loadAppData();
     }
@@ -59,12 +65,14 @@ async function bootstrap() {
 }
 
 async function loadAppData() {
-  const [categoriesPayload, accountsPayload, transactionsPayload] = await Promise.all([
+  const [homePayload, categoriesPayload, accountsPayload, transactionsPayload] = await Promise.all([
+    api("/api/home"),
     api("/api/categories"),
     api("/api/accounts"),
     api(transactionUrl())
   ]);
 
+  state.homeData = homePayload;
   state.categories = categoriesPayload.categories;
   state.accounts = accountsPayload.accounts;
   state.transactions = transactionsPayload.transactions;
@@ -86,6 +94,7 @@ function renderShell() {
   }
 
   setVisible(app.authView, false);
+  renderHome();
   renderDashboard();
   renderCategories();
   renderAccounts();
@@ -93,6 +102,7 @@ function renderShell() {
   renderReports();
 
   const visible = {
+    home: app.homeView,
     dashboard: app.dashboardView,
     categories: app.categoriesView,
     accounts: app.accountsView,
@@ -123,6 +133,7 @@ function renderNav() {
 
 function renderAuth() {
   setVisible(app.authView, true);
+  setVisible(app.homeView, false);
   setVisible(app.dashboardView, false);
   setVisible(app.categoriesView, false);
   setVisible(app.accountsView, false);
@@ -172,13 +183,91 @@ function renderAuth() {
   app.authView.appendChild(fragment);
 }
 
+function renderHome() {
+  const homeData = state.homeData || emptyHomeData();
+  app.homeView.innerHTML = `
+    <div class="panel-header">
+      <div>
+        <p class="eyebrow">Overview</p>
+        <h2>Home</h2>
+        <p class="muted">A quick monthly snapshot with fast entry points for new transactions and statement uploads.</p>
+      </div>
+      <div class="month-badge">${escapeHtml(homeData.month.label)}</div>
+    </div>
+    <div class="stats">
+      ${renderStatCard("Debits", formatCurrency(homeData.summary.debit))}
+      ${renderStatCard("Credits", formatCurrency(homeData.summary.credit))}
+      ${renderStatCard("Transfers", formatCurrency(homeData.summary.transfer))}
+      ${renderStatCard("Rows", String(homeData.summary.count))}
+    </div>
+    <div class="home-grid">
+      <section class="report-card">
+        <h3>Quick add</h3>
+        <p class="muted">Add a transaction without leaving the home page.</p>
+        ${renderTransactionForm("home")}
+      </section>
+      <section class="report-card">
+        <h3>Import statement</h3>
+        <p class="muted">Start with a CSV or PDF from Google Pay or your bank. The full parser and review workflow stays in the Imports page.</p>
+        <div class="stack">
+          <label>Choose a CSV or PDF
+            <input id="home-upload-input" type="file" accept=".csv,.pdf,application/pdf,text/csv" />
+          </label>
+          <div class="upload-callout">
+            <strong>${state.selectedUploadName ? escapeHtml(state.selectedUploadName) : "No file selected yet"}</strong>
+            <span class="muted">Select a file here, then continue in the Imports page for the next step.</span>
+          </div>
+          <div class="button-row">
+            <button type="button" class="secondary" id="go-imports">Go to Imports</button>
+            <button type="button" class="ghost" id="go-dashboard">Open dashboard</button>
+          </div>
+        </div>
+      </section>
+    </div>
+    <div class="chart-grid">
+      <section class="report-card">
+        <h3>Category spend this month</h3>
+        ${renderPieChart(homeData.categoryBreakdown)}
+      </section>
+      <section class="report-card">
+        <h3>Debit vs credit this month</h3>
+        ${renderBarChart(homeData.summary)}
+      </section>
+    </div>
+    <section class="report-card" style="margin-top:18px;">
+      <div class="panel-header">
+        <div>
+          <h3>Last 5 transactions</h3>
+          <p class="muted">Recent activity from across all accounts.</p>
+        </div>
+      </div>
+      ${renderRecentTransactions(homeData.recentTransactions)}
+    </section>
+  `;
+
+  wireTransactionForm("home");
+  app.homeView.querySelector("#home-upload-input").addEventListener("change", (event) => {
+    state.importFile = event.target.files?.[0] || null;
+    state.selectedUploadName = state.importFile?.name || "";
+    renderHome();
+  });
+  app.homeView.querySelector("#go-imports").addEventListener("click", () => {
+    state.currentView = "imports";
+    renderShell();
+  });
+  app.homeView.querySelector("#go-dashboard").addEventListener("click", () => {
+    state.currentView = "dashboard";
+    renderShell();
+  });
+}
+
 function renderDashboard() {
   app.dashboardView.innerHTML = `
     <div class="panel-header">
       <div>
         <p class="eyebrow">Transactions</p>
         <h2>Dashboard</h2>
-        <p class="muted">Track debits, credits, and transfers with local-only storage.</p>
+        <p class="muted">Use filters, inspect rows, edit transactions, and export the current view.</p>
       </div>
       <div class="button-row">
         <button type="button" class="secondary" id="download-csv">Download CSV</button>
@@ -197,7 +286,7 @@ function renderDashboard() {
           <div class="grid-4">
             <label>Start date<input type="date" name="startDate" value="${state.filters.startDate}" /></label>
             <label>End date<input type="date" name="endDate" value="${state.filters.endDate}" /></label>
-            <label>Type${renderTypeSelect(state.filters.txnType, "txnType")}</label>
+            <label>Type${renderTypeSelect(state.filters.txnType, "txnType", true)}</label>
             <label>Account${renderAccountSelect(state.filters.accountId, "accountId")}</label>
           </div>
           <div class="grid-4">
@@ -212,30 +301,13 @@ function renderDashboard() {
         </form>
       </section>
       <section class="report-card">
-        <h3>${state.editingTransactionId ? "Edit transaction" : "Add transaction"}</h3>
-        <form id="transaction-form" class="stack">
-          <div class="grid-2">
-            <label>Type${renderTypeSelect(state.transactionDraft.txnType, "txnType", false)}</label>
-            <label>Date<input type="date" name="txnDate" value="${state.transactionDraft.txnDate}" required /></label>
-          </div>
-          <div class="grid-2">
-            <label>Amount<input type="number" name="amount" min="0.01" step="0.01" value="${state.transactionDraft.amount}" required /></label>
-            <label>Account${renderAccountSelect(state.transactionDraft.accountId, "accountId")}</label>
-          </div>
-          <div class="grid-2">
-            <label>Category${renderCategorySelect(state.transactionDraft.categoryId, "categoryId")}</label>
-            <label>Sub-category${renderSubcategorySelect(state.transactionDraft.categoryId, state.transactionDraft.subcategoryId, "subcategoryId")}</label>
-          </div>
-          <div class="grid-2">
-            <label>Description<input name="description" maxlength="120" value="${escapeHtml(state.transactionDraft.description)}" placeholder="Short merchant-style description" /></label>
-            <label>Note<input name="note" maxlength="70" value="${escapeHtml(state.transactionDraft.note)}" placeholder="Optional note, max 70 chars" /></label>
-          </div>
-          <div class="button-row">
-            <button type="submit" class="primary">${state.editingTransactionId ? "Save changes" : "Add transaction"}</button>
-            ${state.editingTransactionId ? '<button type="button" class="ghost" id="cancel-edit">Cancel</button>' : ""}
-          </div>
-          <p class="inline-error" id="transaction-error"></p>
-        </form>
+        <h3>${state.editingTransactionId ? "Edit transaction" : "Edit support"}</h3>
+        ${
+          state.editingTransactionId
+            ? `${renderTransactionForm("dashboard")}
+              <p class="muted">You are editing transaction #${state.editingTransactionId}.</p>`
+            : `<div class="empty-state">Choose a row below and click edit to update it here. New entries can be added from the Home page.</div>`
+        }
       </section>
     </div>
     <section class="report-card" style="margin-top:18px;">
@@ -276,22 +348,24 @@ function renderDashboard() {
     await refreshTransactions();
   });
 
-  app.dashboardView.querySelector("#transaction-form").addEventListener("submit", saveTransaction);
+  if (state.editingTransactionId) {
+    wireTransactionForm("dashboard");
+    const cancelEdit = app.dashboardView.querySelector("#cancel-edit");
+    if (cancelEdit) {
+      cancelEdit.addEventListener("click", () => {
+        state.editingTransactionId = null;
+        state.transactionDraft = defaultTransactionDraft();
+        renderDashboard();
+      });
+    }
+  }
+
   app.dashboardView.querySelectorAll("[data-edit-transaction]").forEach((button) => {
     button.addEventListener("click", () => startEditTransaction(Number(button.dataset.editTransaction)));
   });
   app.dashboardView.querySelectorAll("[data-resolve-flag]").forEach((button) => {
     button.addEventListener("click", () => resolveFlag(Number(button.dataset.resolveFlag)));
   });
-
-  const cancelEdit = app.dashboardView.querySelector("#cancel-edit");
-  if (cancelEdit) {
-    cancelEdit.addEventListener("click", () => {
-      state.editingTransactionId = null;
-      state.transactionDraft = defaultTransactionDraft();
-      renderDashboard();
-    });
-  }
 }
 
 function renderCategories() {
@@ -320,11 +394,7 @@ function renderCategories() {
       </section>
       <section class="report-card">
         <h3>Starter icon note</h3>
-        <p class="muted">
-          This first version stores a simple icon key such as <code>fork-knife</code> or <code>wallet</code>.
-          The visual icon picker and image uploads up to 300 KB will be added in the next pass without changing
-          the category model.
-        </p>
+        <p class="muted">This version still stores a simple icon key. The visual icon picker and image uploads can land next without changing the data model.</p>
       </section>
     </div>
     <section class="report-card" style="margin-top:18px;">
@@ -388,28 +458,89 @@ function renderAccounts() {
 }
 
 function renderImports() {
+  const preview = state.importPreview;
+  const summary = preview?.summary;
   app.importsView.innerHTML = `
     <div class="panel-header">
       <div>
         <p class="eyebrow">Imports</p>
-        <h2>Statement import groundwork</h2>
-        <p class="muted">The first functional slice focuses on local auth, manual entry, and reporting. Import review is scaffolded next.</p>
+        <h2>CSV import review</h2>
+        <p class="muted">Upload a CSV, let the app infer the fields locally, and approve the rows you want to save.</p>
       </div>
     </div>
     <section class="report-card">
-      <h3>Planned import flow</h3>
-      <ol>
-        <li>Upload bank CSV, bank PDF, or Google Pay export.</li>
-        <li>Parse rows into a normalized review table.</li>
-        <li>Suggest type, category, account, and description locally.</li>
-        <li>Warn on duplicates and near-duplicates.</li>
-        <li>Approve only the rows you want to save.</li>
-      </ol>
-      <p class="muted">
-        The schema and dashboard rules are already set up to support duplicate flags and editable imported data.
-      </p>
+      <div class="split">
+        <div class="stack">
+          <h3>Choose CSV</h3>
+          <label>Select a bank or Google Pay CSV
+            <input id="imports-file-input" type="file" accept=".csv,text/csv" />
+          </label>
+          <div class="upload-callout">
+            <strong>${state.selectedUploadName ? escapeHtml(state.selectedUploadName) : "No CSV selected yet"}</strong>
+            <span class="muted">CSV import is live now. PDF parsing can follow next.</span>
+          </div>
+          <div class="button-row">
+            <button type="button" class="primary" id="preview-import" ${state.importFile ? "" : "disabled"}>Preview CSV</button>
+            <button type="button" class="ghost" id="clear-import" ${state.importFile || preview ? "" : "disabled"}>Clear</button>
+          </div>
+          <p class="inline-error" id="import-error"></p>
+          ${state.importResult ? `<p class="muted">${escapeHtml(state.importResult)}</p>` : ""}
+        </div>
+        <div class="report-card">
+          <h3>How this works</h3>
+          <ul>
+            <li>The browser reads the CSV locally.</li>
+            <li>The local server infers date, amount, type, description, category, and account.</li>
+            <li>Hard duplicates are excluded by default.</li>
+            <li>You can edit rows before import.</li>
+          </ul>
+        </div>
+      </div>
     </section>
+    ${
+      preview
+        ? `<section class="report-card" style="margin-top:18px;">
+            <div class="panel-header">
+              <div>
+                <h3>Review rows</h3>
+                <p class="muted">${summary.total} rows found, ${summary.hardDuplicates} hard duplicates, ${summary.nearDuplicates} near-duplicates, ${summary.needsCategory} rows needing category review.</p>
+              </div>
+              <div class="button-row">
+                <button type="button" class="primary" id="commit-import">Import selected rows</button>
+              </div>
+            </div>
+            ${renderImportPreviewTable(preview.rows)}
+          </section>`
+        : ""
+    }
   `;
+
+  const fileInput = app.importsView.querySelector("#imports-file-input");
+  if (fileInput) {
+    fileInput.addEventListener("change", (event) => {
+      state.importFile = event.target.files?.[0] || null;
+      state.selectedUploadName = state.importFile?.name || "";
+      state.importResult = null;
+      renderImports();
+    });
+  }
+
+  app.importsView.querySelector("#preview-import")?.addEventListener("click", previewImportCsv);
+  app.importsView.querySelector("#clear-import")?.addEventListener("click", () => {
+    state.importFile = null;
+    state.selectedUploadName = "";
+    state.importPreview = null;
+    state.importResult = null;
+    renderImports();
+  });
+
+  if (preview) {
+    app.importsView.querySelector("#commit-import")?.addEventListener("click", commitImportRows);
+    app.importsView.querySelectorAll("[data-import-field]").forEach((node) => {
+      node.addEventListener("change", handleImportPreviewChange);
+      node.addEventListener("input", handleImportPreviewChange);
+    });
+  }
 }
 
 function renderReports() {
@@ -418,14 +549,14 @@ function renderReports() {
       <div>
         <p class="eyebrow">Reports</p>
         <h2>Exports and summaries</h2>
-        <p class="muted">CSV export is live in this first version. Formatted PDF reports are next.</p>
+        <p class="muted">CSV export is live in this version. Formatted PDF reports are next.</p>
       </div>
     </div>
     <section class="report-card">
       <h3>Current export support</h3>
       <ul>
         <li>Download the currently filtered dashboard as CSV.</li>
-        <li>Summary cards show debits, credits, transfers, and row count.</li>
+        <li>Monthly charts on Home use this month’s transactions only.</li>
         <li>PDF report generation will build on the same filtered dataset.</li>
       </ul>
       <div class="button-row">
@@ -437,6 +568,35 @@ function renderReports() {
   app.reportsView.querySelector("#reports-csv").addEventListener("click", () => {
     window.location.href = `/api/export.csv?${new URLSearchParams(state.filters).toString()}`;
   });
+}
+
+function renderTransactionForm(context) {
+  const includeCancel = context === "dashboard" && state.editingTransactionId;
+  return `
+    <form id="${context}-transaction-form" class="stack">
+      <div class="grid-2">
+        <label>Type${renderTypeSelect(state.transactionDraft.txnType, "txnType", false)}</label>
+        <label>Date<input type="date" name="txnDate" value="${state.transactionDraft.txnDate}" required /></label>
+      </div>
+      <div class="grid-2">
+        <label>Amount<input type="number" name="amount" min="0.01" step="0.01" value="${state.transactionDraft.amount}" required /></label>
+        <label>Account${renderAccountSelect(state.transactionDraft.accountId, "accountId")}</label>
+      </div>
+      <div class="grid-2">
+        <label>Category${renderCategorySelect(state.transactionDraft.categoryId, "categoryId")}</label>
+        <label>Sub-category${renderSubcategorySelect(state.transactionDraft.categoryId, state.transactionDraft.subcategoryId, "subcategoryId")}</label>
+      </div>
+      <div class="grid-2">
+        <label>Description<input name="description" maxlength="120" value="${escapeHtml(state.transactionDraft.description)}" placeholder="Short merchant-style description" /></label>
+        <label>Note<input name="note" maxlength="70" value="${escapeHtml(state.transactionDraft.note)}" placeholder="Optional note, max 70 chars" /></label>
+      </div>
+      <div class="button-row">
+        <button type="submit" class="primary">${state.editingTransactionId ? "Save changes" : "Add transaction"}</button>
+        ${includeCancel ? '<button type="button" class="ghost" id="cancel-edit">Cancel</button>' : ""}
+      </div>
+      <p class="inline-error" id="${context}-transaction-error"></p>
+    </form>
+  `;
 }
 
 function renderTransactionsTable() {
@@ -465,10 +625,7 @@ function renderTransactionsTable() {
             <td>${escapeHtml(txn.txnDate)}</td>
             <td><span class="type-pill ${txn.txnType}">${escapeHtml(txn.txnType)}</span></td>
             <td>${formatCurrency(txn.amount)}</td>
-            <td>
-              ${escapeHtml(txn.categoryName || "")}
-              ${txn.subcategoryName ? `<div class="muted">${escapeHtml(txn.subcategoryName)}</div>` : ""}
-            </td>
+            <td>${escapeHtml(txn.categoryName || "")}${txn.subcategoryName ? `<div class="muted">${escapeHtml(txn.subcategoryName)}</div>` : ""}</td>
             <td>${escapeHtml(txn.accountDisplay || "")}</td>
             <td>${escapeHtml(txn.description || "")}</td>
             <td>${escapeHtml(txn.note || "")}</td>
@@ -489,6 +646,191 @@ function renderTransactionsTable() {
   `;
 }
 
+function renderRecentTransactions(transactions) {
+  if (!transactions.length) {
+    return `<div class="empty-state">No recent transactions yet.</div>`;
+  }
+
+  return `
+    <table class="simple-table">
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Type</th>
+          <th>Amount</th>
+          <th>Category</th>
+          <th>Account</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${transactions.map((txn) => `
+          <tr>
+            <td>${escapeHtml(txn.txnDate)}</td>
+            <td><span class="type-pill ${txn.txnType}">${escapeHtml(txn.txnType)}</span></td>
+            <td>${formatCurrency(txn.amount)}</td>
+            <td>${escapeHtml(txn.categoryName || "")}</td>
+            <td>${escapeHtml(txn.accountDisplay || "")}</td>
+            <td>${escapeHtml(txn.description || "")}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderPieChart(items) {
+  if (!items.length) {
+    return `<div class="empty-state">No debit spend recorded this month yet.</div>`;
+  }
+
+  const total = items.reduce((sum, item) => sum + item.amount, 0);
+  let angle = -Math.PI / 2;
+  const radius = 82;
+  const center = 110;
+  const colors = ["#2b6cb0", "#4c8ed9", "#66a4e7", "#8dbcf0", "#b0d1f7", "#1f4f83", "#3d79be"];
+
+  const slices = items.map((item, index) => {
+    const fraction = item.amount / total;
+    const nextAngle = angle + fraction * Math.PI * 2;
+    const x1 = center + radius * Math.cos(angle);
+    const y1 = center + radius * Math.sin(angle);
+    const x2 = center + radius * Math.cos(nextAngle);
+    const y2 = center + radius * Math.sin(nextAngle);
+    const largeArc = fraction > 0.5 ? 1 : 0;
+    const path = `M ${center} ${center} L ${x1} ${y1} A ${radius} ${radius} 0 ${largeArc} 1 ${x2} ${y2} Z`;
+    angle = nextAngle;
+    return `<path d="${path}" fill="${colors[index % colors.length]}"></path>`;
+  }).join("");
+
+  return `
+    <div class="chart-wrap">
+      <svg viewBox="0 0 220 220" class="chart-svg" aria-label="Category spend pie chart">
+        ${slices}
+        <circle cx="${center}" cy="${center}" r="42" fill="#fcfeff"></circle>
+        <text x="${center}" y="${center - 4}" text-anchor="middle" class="chart-total-label">Spend</text>
+        <text x="${center}" y="${center + 18}" text-anchor="middle" class="chart-total-value">${formatShortCurrency(total)}</text>
+      </svg>
+      <div class="chart-legend">
+        ${items.map((item, index) => `
+          <div class="legend-row">
+            <span class="legend-swatch" style="background:${colors[index % colors.length]}"></span>
+            <span>${escapeHtml(item.name)}</span>
+            <strong>${formatCurrency(item.amount)}</strong>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderBarChart(summary) {
+  const values = [
+    { label: "Debit", key: "debit", value: summary.debit, color: "#2b6cb0" },
+    { label: "Credit", key: "credit", value: summary.credit, color: "#4c8ed9" }
+  ];
+  const max = Math.max(...values.map((item) => item.value), 1);
+
+  return `
+    <div class="bar-chart">
+      ${values.map((item) => {
+        const height = Math.max((item.value / max) * 220, item.value ? 24 : 12);
+        return `
+          <div class="bar-group">
+            <div class="bar-value">${formatShortCurrency(item.value)}</div>
+            <div class="bar-column">
+              <div class="bar-fill" style="height:${height}px;background:${item.color};"></div>
+            </div>
+            <div class="bar-label">${item.label}</div>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderImportPreviewTable(rows) {
+  return `
+    <div class="import-table-wrap">
+      <table class="transactions-table imports-preview-table">
+        <thead>
+          <tr>
+            <th>Use</th>
+            <th>Row</th>
+            <th>Date</th>
+            <th>Type</th>
+            <th>Amount</th>
+            <th>Category</th>
+            <th>Sub-category</th>
+            <th>Account</th>
+            <th>Description</th>
+            <th>Note</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((row, index) => `
+            <tr>
+              <td><input type="checkbox" data-import-field="includeInImport" data-row-index="${index}" ${row.includeInImport ? "checked" : ""} ${row.duplicateStatus === "hard_duplicate" ? "disabled" : ""} /></td>
+              <td>${row.rowIndex}</td>
+              <td><input type="date" value="${escapeHtml(row.txnDate || "")}" data-import-field="txnDate" data-row-index="${index}" /></td>
+              <td>${renderImportTypeSelect(row.txnType, index)}</td>
+              <td><input type="number" min="0.01" step="0.01" value="${row.amount || ""}" data-import-field="amount" data-row-index="${index}" /></td>
+              <td>${renderImportCategorySelect(row.categoryId, index)}</td>
+              <td>${renderImportSubcategorySelect(row.categoryId, row.subcategoryId, index)}</td>
+              <td>${renderImportAccountSelect(row.accountId, index)}</td>
+              <td><input type="text" maxlength="120" value="${escapeHtml(row.description || "")}" data-import-field="description" data-row-index="${index}" /></td>
+              <td><input type="text" maxlength="70" value="${escapeHtml(row.note || "")}" data-import-field="note" data-row-index="${index}" /></td>
+              <td>
+                <span class="flag-pill ${row.duplicateStatus === "none" ? "resolved" : row.duplicateStatus}">${escapeHtml(row.duplicateStatus.replace("_", " "))}</span>
+                ${row.duplicateReference ? `<div class="muted">${escapeHtml(row.duplicateReference)}</div>` : ""}
+                ${row.warnings?.length ? `<div class="muted">${escapeHtml(row.warnings.join(" "))}</div>` : ""}
+              </td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderImportTypeSelect(selected, rowIndex) {
+  return `
+    <select data-import-field="txnType" data-row-index="${rowIndex}">
+      ${["debit", "credit", "transfer"].map((value) => `<option value="${value}" ${value === selected ? "selected" : ""}>${value}</option>`).join("")}
+    </select>
+  `;
+}
+
+function renderImportCategorySelect(selected, rowIndex) {
+  const options = [["", "Select category"], ...state.categories.map((category) => [String(category.id), category.name])];
+  return `
+    <select data-import-field="categoryId" data-row-index="${rowIndex}">
+      ${options.map(([value, label]) => `<option value="${value}" ${String(value) === String(selected || "") ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+    </select>
+  `;
+}
+
+function renderImportSubcategorySelect(categoryId, selected, rowIndex) {
+  const category = state.categories.find((item) => String(item.id) === String(categoryId));
+  const subcategories = category?.subcategories || [];
+  const options = [["", "No sub-category"], ...subcategories.map((sub) => [String(sub.id), sub.name])];
+  return `
+    <select data-import-field="subcategoryId" data-row-index="${rowIndex}">
+      ${options.map(([value, label]) => `<option value="${value}" ${String(value) === String(selected || "") ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+    </select>
+  `;
+}
+
+function renderImportAccountSelect(selected, rowIndex) {
+  const options = [["", "None"], ...state.accounts.map((account) => [String(account.id), `${account.name}${account.last4 ? ` (${account.last4})` : ""}`])];
+  return `
+    <select data-import-field="accountId" data-row-index="${rowIndex}">
+      ${options.map(([value, label]) => `<option value="${value}" ${String(value) === String(selected || "") ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+    </select>
+  `;
+}
+
 function renderCategoryCard(category) {
   return `
     <article class="category-card">
@@ -505,34 +847,34 @@ function renderCategoryCard(category) {
 
 function renderTypeSelect(selected, name, includeAll = false) {
   const options = [
-    ...(includeAll ? [['all', 'All types']] : []),
-    ['debit', 'Debit'],
-    ['credit', 'Credit'],
-    ['transfer', 'Transfer']
+    ...(includeAll ? [["all", "All types"]] : []),
+    ["debit", "Debit"],
+    ["credit", "Credit"],
+    ["transfer", "Transfer"]
   ];
   return `<select name="${name}">${options.map(([value, label]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`).join("")}</select>`;
 }
 
 function renderCategorySelect(selected, name, includeAll = false) {
   const options = [
-    ...(includeAll ? [['', 'All categories']] : [['', 'Select category']]),
+    ...(includeAll ? [["", "All categories"]] : [["", "Select category"]]),
     ...state.categories.map((category) => [String(category.id), category.name])
   ];
-  return `<select name="${name}" data-category-select="${name}">${options.map(([value, label]) => `<option value="${value}" ${String(value) === String(selected || "") ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select>`;
+  return `<select name="${name}">${options.map(([value, label]) => `<option value="${value}" ${String(value) === String(selected || "") ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select>`;
 }
 
 function renderSubcategorySelect(categoryId, selected, name, includeAll = false) {
   const category = state.categories.find((item) => String(item.id) === String(categoryId));
   const subcategories = category?.subcategories || [];
   const options = [
-    ...(includeAll ? [['', 'All sub-categories']] : [['', 'No sub-category']]),
+    ...(includeAll ? [["", "All sub-categories"]] : [["", "No sub-category"]]),
     ...subcategories.map((sub) => [String(sub.id), sub.name])
   ];
   return `<select name="${name}">${options.map(([value, label]) => `<option value="${value}" ${String(value) === String(selected || "") ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select>`;
 }
 
 function renderAccountSelect(selected, name) {
-  const options = [['', 'All / none'], ...state.accounts.map((account) => [String(account.id), `${account.name}${account.last4 ? ` (${account.last4})` : ""}`])];
+  const options = [["", "All / none"], ...state.accounts.map((account) => [String(account.id), `${account.name}${account.last4 ? ` (${account.last4})` : ""}`])];
   return `<select name="${name}">${options.map(([value, label]) => `<option value="${value}" ${String(value) === String(selected || "") ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select>`;
 }
 
@@ -540,9 +882,14 @@ function renderStatCard(label, value) {
   return `<article class="stat-card"><span class="label">${label}</span><strong>${value}</strong></article>`;
 }
 
-async function saveTransaction(event) {
+function wireTransactionForm(context) {
+  const form = document.querySelector(`#${context}-transaction-form`);
+  form?.addEventListener("submit", (event) => saveTransaction(event, context));
+}
+
+async function saveTransaction(event, context) {
   event.preventDefault();
-  const errorNode = app.dashboardView.querySelector("#transaction-error");
+  const errorNode = document.querySelector(`#${context}-transaction-error`);
   errorNode.textContent = "";
   const data = new FormData(event.currentTarget);
   const payload = {
@@ -571,9 +918,118 @@ async function saveTransaction(event) {
 
     state.editingTransactionId = null;
     state.transactionDraft = defaultTransactionDraft();
-    await refreshTransactions();
+    await refreshDataAfterTransactionChange();
   } catch (error) {
     errorNode.textContent = error.message;
+  }
+}
+
+async function refreshDataAfterTransactionChange() {
+  const [homePayload, transactionsPayload] = await Promise.all([
+    api("/api/home"),
+    api(transactionUrl())
+  ]);
+  state.homeData = homePayload;
+  state.transactions = transactionsPayload.transactions;
+  state.summary = transactionsPayload.summary;
+  renderShell();
+}
+
+async function previewImportCsv() {
+  const errorNode = app.importsView.querySelector("#import-error");
+  if (errorNode) {
+    errorNode.textContent = "";
+  }
+  state.importResult = null;
+
+  try {
+    if (!state.importFile) {
+      throw new Error("Choose a CSV file first.");
+    }
+
+    const csvText = await state.importFile.text();
+    const rawRows = parseCsvText(csvText);
+    const rowObjects = csvRowsToObjects(rawRows);
+    if (!rowObjects.length) {
+      throw new Error("The CSV did not contain any data rows.");
+    }
+
+    state.importPreview = await api("/api/imports/preview", {
+      method: "POST",
+      body: JSON.stringify({
+        fileName: state.importFile.name,
+        rows: rowObjects
+      })
+    });
+    renderImports();
+  } catch (error) {
+    if (errorNode) {
+      errorNode.textContent = error.message;
+    }
+  }
+}
+
+function handleImportPreviewChange(event) {
+  const rowIndex = Number(event.target.dataset.rowIndex);
+  const field = event.target.dataset.importField;
+  const row = state.importPreview?.rows?.[rowIndex];
+  if (!row || !field) {
+    return;
+  }
+
+  if (field === "includeInImport") {
+    row.includeInImport = event.target.checked;
+  } else if (field === "amount") {
+    row.amount = Number(event.target.value || 0);
+  } else if (field === "categoryId" || field === "subcategoryId" || field === "accountId") {
+    row[field] = event.target.value ? Number(event.target.value) : null;
+    if (field === "categoryId") {
+      row.subcategoryId = null;
+      renderImports();
+      return;
+    }
+  } else {
+    row[field] = event.target.value;
+  }
+}
+
+async function commitImportRows() {
+  const errorNode = app.importsView.querySelector("#import-error");
+  if (errorNode) {
+    errorNode.textContent = "";
+  }
+
+  try {
+    if (!state.importPreview?.rows?.length) {
+      throw new Error("Preview a CSV before importing.");
+    }
+
+    const invalidRow = state.importPreview.rows.find((row) =>
+      row.includeInImport &&
+      ((row.txnType === "debit" || row.txnType === "credit") && !row.categoryId)
+    );
+    if (invalidRow) {
+      throw new Error(`Row ${invalidRow.rowIndex} still needs a category before import.`);
+    }
+
+    const result = await api("/api/imports/commit", {
+      method: "POST",
+      body: JSON.stringify({
+        rows: state.importPreview.rows
+      })
+    });
+
+    state.importResult = `Imported ${result.counts.imported} rows, skipped ${result.counts.skipped}, errors ${result.counts.errors}.`;
+    state.importPreview = null;
+    state.importFile = null;
+    state.selectedUploadName = "";
+    await loadAppData();
+    state.currentView = "imports";
+    renderShell();
+  } catch (error) {
+    if (errorNode) {
+      errorNode.textContent = error.message;
+    }
   }
 }
 
@@ -679,7 +1135,7 @@ async function resolveFlag(id) {
       duplicate_flag: "resolved"
     })
   });
-  await refreshTransactions();
+  await refreshDataAfterTransactionChange();
 }
 
 async function refreshTransactions() {
@@ -696,6 +1152,7 @@ async function logout() {
     user: null
   };
   state.transactions = [];
+  state.homeData = null;
   renderShell();
 }
 
@@ -756,14 +1213,101 @@ function formatCurrency(value) {
   }).format(Number(value || 0));
 }
 
+function formatShortCurrency(value) {
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    notation: "compact",
+    maximumFractionDigits: 1
+  }).format(Number(value || 0));
+}
+
 function today() {
-  return new Date().toISOString().slice(0, 10);
+  return localDateString(new Date());
 }
 
 function offsetDate(days) {
   const date = new Date();
   date.setDate(date.getDate() + days);
-  return date.toISOString().slice(0, 10);
+  return localDateString(date);
+}
+
+function parseCsvText(csvText) {
+  const rows = [];
+  let current = "";
+  let row = [];
+  let inQuotes = false;
+
+  for (let index = 0; index < csvText.length; index += 1) {
+    const char = csvText[index];
+    const nextChar = csvText[index + 1];
+
+    if (char === '"') {
+      if (inQuotes && nextChar === '"') {
+        current += '"';
+        index += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (char === "," && !inQuotes) {
+      row.push(current);
+      current = "";
+    } else if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (char === "\r" && nextChar === "\n") {
+        index += 1;
+      }
+      row.push(current);
+      if (row.some((value) => String(value).trim() !== "")) {
+        rows.push(row);
+      }
+      row = [];
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+
+  row.push(current);
+  if (row.some((value) => String(value).trim() !== "")) {
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+function csvRowsToObjects(rows) {
+  if (!rows.length) {
+    return [];
+  }
+
+  const headers = rows[0].map((header, index) => {
+    const cleaned = String(header || "").trim();
+    return cleaned || `column_${index + 1}`;
+  });
+
+  return rows.slice(1).map((cells) => {
+    const row = {};
+    headers.forEach((header, index) => {
+      row[header] = cells[index] ?? "";
+    });
+    return row;
+  }).filter((row) => Object.values(row).some((value) => String(value).trim() !== ""));
+}
+
+function emptyHomeData() {
+  return {
+    month: { label: "This month" },
+    summary: { debit: 0, credit: 0, transfer: 0, count: 0 },
+    categoryBreakdown: [],
+    recentTransactions: []
+  };
+}
+
+function localDateString(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function escapeHtml(value) {
