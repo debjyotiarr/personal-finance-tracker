@@ -1,0 +1,20 @@
+{
+  "name": "Finance Tracker",
+  "short_name": "Finances",
+  "description": "A private, offline-first personal finance tracker.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#EEF2EF",
+  "theme_color": "#EEF2EF",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ],
+  "shortcuts": [
+    { "name": "Add transaction", "url": "./#/add" },
+    { "name": "Insights", "url": "./#/insights" }
+  ]
+}

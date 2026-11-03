@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Finance Tracker</title>
+    <meta name="description" content="A private, offline-first personal finance tracker for iPhone and Mac." />
+    <meta name="theme-color" content="#EEF2EF" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0F1513" media="(prefers-color-scheme: dark)" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Finances" />
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="icons/icon-180.png" />
+    <link rel="stylesheet" href="css/styles.css" />
+  </head>
+  <body>
+    <div class="app" id="app" hidden>
+      <aside class="sidebar" aria-label="Main">
+        <div class="brand">
+          <img src="icons/icon.svg" alt="" width="32" height="32" />
+          <span>Finances</span>
+        </div>
+        <button type="button" class="add-wide" data-action="add">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+          Add transaction
+          <kbd>N</kbd>
+        </button>
+        <nav class="side-nav" data-nav></nav>
+        <div class="side-foot" data-sync-chip></div>
+      </aside>
+
+      <main class="main" id="main" tabindex="-1"></main>
+
+      <nav class="tabbar" aria-label="Main" data-tabbar></nav>
+    </div>
+
+    <div class="lock" id="lock" hidden></div>
+    <div class="boot" id="boot">
+      <img src="icons/icon.svg" alt="" width="56" height="56" />
+    </div>
+
+    <dialog class="sheet" id="sheet" aria-labelledby="sheet-title"></dialog>
+    <div class="toast-zone" id="toasts" aria-live="polite"></div>
+
+    <script type="module" src="js/main.js"></script>
+  </body>
+</html>

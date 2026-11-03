@@ -1,5 +1,10 @@
 .DS_Store
 .idea/
-data/app.db
-data/uploads/
-data/exports/
+node_modules/
+
+# Old SQLite version data, and exports from the migration script
+data/
+legacy-import.json
+
+# Sync files contain your financial data; keep them out of git
+finance-sync*.json
