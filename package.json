@@ -1,10 +1,17 @@
 {
   "name": "finance-tracker",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Local-first personal finance tracker",
+  "description": "Offline-first personal finance tracker for iPhone and Mac (installable web app)",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node scripts/dev-server.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:e2e": "node tests/e2e.mjs",
+    "icons": "node scripts/make-icons.mjs",
+    "migrate-legacy": "node scripts/migrate-legacy-sqlite.mjs"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

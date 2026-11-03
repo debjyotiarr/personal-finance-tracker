@@ -1,752 +1,186 @@
-# FinanceTracker
+# Finance Tracker
 
-FinanceTracker is a local-first personal expense tracker designed for single-user use on a laptop or desktop. It helps track expenses, credits, and transfers; manage categories and sub-categories; import transactions from bank and Google Pay statements; review and deduplicate imported entries; and export filtered reports as CSV or PDF.
+A private personal finance tracker that lives on your **iPhone** and **MacBook**. Log spending in a couple of taps, then review the month: where the money went, how it compares with usual, and where you could save.
 
-The initial release is intended to run as a local web app in the browser. The architecture should make it straightforward to package later as a desktop app without a major rewrite.
+- **Works offline.** It's an installable web app (PWA). Once opened, it runs without a connection.
+- **Your data stays with you.** Everything is stored on the device. There is no server and no account.
+- **Syncs when you want.** Devices share data through one file in iCloud Drive or Google Drive. Sync daily, weekly or once at the end of the month.
+- **Any currency.** Add currencies and set each one's rate to USD and to INR separately. Totals can be shown in rupees or dollars.
 
-## Current Build Status
+See [plan.md](plan.md) for what's done, what's next, and the reasoning behind the design.
 
-The repository now includes a working first-version foundation with:
+---
 
-- Local Node.js server with no external runtime dependencies
-- Local SQLite database initialization
-- First-run single-user account setup and login
-- Starter categories
-- Account creation
-- Manual transaction entry and editing
-- Filterable dashboard
-- Near-duplicate flagging and manual de-flagging
-- CSV export for the filtered transaction table
+## Using it
 
-Not yet implemented in this first runnable slice:
+### Install on iPhone
 
-- CSV/PDF statement parsing and review flow
-- Formatted PDF export
-- Category icon picker and custom logo upload UI
-- Desktop packaging
+1. Open the app's address in **Safari** (see [Hosting](#hosting)).
+2. Tap **Share › Add to Home Screen**.
+3. Open it from the Home Screen icon from now on.
 
-## Quick Start
+Use the Home Screen app, not a Safari tab. Safari can clear storage for websites you haven't visited in a while; Home Screen apps keep their data.
 
-### Requirements
+### Install on Mac
 
-- Node.js 24 or later
+- **Safari** (macOS Sonoma or later): **File › Add to Dock**.
+- **Chrome**: click the install icon in the address bar. Chrome also supports one-click sync to a linked file.
 
-### Run Locally
+### Sync between iPhone and Mac
+
+Each device keeps a full copy of your data. To bring them in step, open **Settings › Sync & backup**:
+
+1. **Merge in the latest file**: pick `finance-sync.json` from iCloud Drive or Google Drive.
+2. **Save the updated file**: save it back to the same folder. On iPhone, choose *Save to Files › Replace*.
+
+Do this on one device, then the other. Each record keeps its most recent edit, and deletions carry across. Merging is always safe: merging the same file twice, or several old copies, never duplicates or loses anything.
+
+In Chrome on the Mac you can **link** the file once, and then sync is a single click.
+
+*Set-up tip:* make a folder called `Finances` in iCloud Drive. For Google Drive on iPhone, enable it under *Files › Browse › ⋯ › Edit*. On Mac, use Google Drive for desktop.
+
+### Keyboard shortcuts (Mac)
+
+`N` add a transaction, `/` search, `1`–`4` switch screens, `Esc` close a sheet.
+
+---
+
+## Features
+
+**Fast entry**
+- One sheet for expenses, income and transfers, with a big amount field and a category grid ordered by what you use most.
+- Type sums straight into the amount: `120+45`, `3*250`.
+- Notes autocomplete from past entries and fill in the category you used last time ("Swiggy" → Food).
+- Today / Yesterday / any date, optional account, any currency.
+- Warns if a same-day entry in the same category has nearly the same amount (likely duplicate). The tolerance is adjustable.
+- Undo after adding or deleting.
+
+**Repeating entries**: rent, salary and subscriptions are logged automatically on their due day (weekly, monthly, quarterly or yearly). They can be paused, ended or edited.
+
+**Categories & budgets**
+- Custom categories with an emoji and colour, for spending or income.
+- Optional monthly budget per category and overall, in INR or USD.
+- Hide categories you no longer use, without touching past entries.
+
+**Accounts** (optional): bank accounts, cards, cash and wallets, with last 4 digits. Transfers between them don't count as spending.
+
+**Currencies**
+- INR and USD built in. Add any other currency (20 common ones are preset).
+- For each currency, set *1 unit = x USD* and *1 unit = y INR* independently.
+- Each transaction stores the rates in effect when it was added, so changing a rate doesn't silently rewrite past months. You can choose to re-apply new rates to existing entries.
+
+**Home**: this month's spending as one big number, a colour ribbon by category, the budget left and days to go, budget progress bars, and recent entries.
+
+**Activity**: every entry grouped by day, with search (notes, categories, amounts), filters by month, type, category and account, and CSV export (with INR and USD columns).
+
+**Insights** (month or year, in INR or USD)
+- Spent, income, kept, and savings rate, compared with last period.
+- **Worth a look**: plain-language observations and suggestions, for example:
+  - over budget, or a category running ahead of its budget;
+  - a projected month-end total (regular bills counted once, day-to-day spending extrapolated) with a daily allowance to stay on track;
+  - categories up sharply against what you'd usually have spent *by the same day of the month*;
+  - frequent small purchases that add up;
+  - a single purchase dominating the month;
+  - regular charges and subscriptions, and their monthly total;
+  - suggested budgets based on the last 3 months.
+- Charts: category donut, cumulative spending through the month against last month and budget, 12-month income vs spending, and day-of-week habits.
+- Lists: regular charges detected, biggest expenses, most frequent merchants.
+
+**Privacy**: an optional 4–6 digit passcode lock that re-locks after 5 minutes in the background. It is a lock, not encryption.
+
+**Looks**: a clean, native-feeling design for iPhone and Mac, with light and dark mode, safe-area aware, and reduced-motion respected.
+
+---
+
+## How it works
+
+```
+app/                      the whole app: static files, no build step
+  index.html              shell
+  manifest.webmanifest    install metadata
+  sw.js                   service worker (offline cache)
+  css/styles.css
+  icons/
+  js/
+    main.js               boot, routing, navigation, shortcuts
+    store.js              in-memory state + persistence
+    db.js                 IndexedDB wrapper
+    sync.js               sync-file format and merge
+    recurring.js          repeating-entry schedule
+    analytics.js          totals, trends, projections, insights
+    money.js              currencies, conversion, formatting, amount maths
+    charts.js             SVG charts
+    defaults.js           starter categories and currencies
+    ui/                   one module per screen, plus shared helpers
+scripts/
+  dev-server.mjs          local static server
+  make-icons.mjs          renders the PNG icons from icons/icon.svg
+  migrate-legacy-sqlite.mjs  converts data from the old SQLite version
+tests/
+  logic.test.mjs          unit tests (node:test)
+  e2e.mjs                 browser tests of the main flows, incl. two-device sync
+```
+
+Plain ES modules with no framework or dependencies keep the app small, fast to load on a phone, and easy to maintain. The logic modules (`sync`, `analytics`, `money`, `recurring`, `util`) don't touch the DOM, so they're unit-tested in Node.
+
+### Data model
+
+Every record has a string `id`, `createdAt` and `updatedAt`. A deleted record becomes a tombstone `{ id, deleted: true, updatedAt }` so the deletion syncs.
+
+| Collection | Key fields |
+|---|---|
+| `transactions` | `type` (expense / income / transfer), `date`, `amount`, `currency`, `rateUSD`, `rateINR` (snapshot), `categoryId`, `accountId`, `toAccountId`, `note`, `recurringId`, `flag` |
+| `categories` | `name`, `emoji`, `color`, `kind` (expense / income), `budget {amount, currency}`, `order`, `archived` |
+| `accounts` | `name`, `last4`, `kind`, `archived` |
+| `currencies` | `code` (also the id), `name`, `symbol`, `toUSD`, `toINR` |
+| `recurring` | the transaction template plus `frequency`, `startDate`, `endDate`, `paused` |
+| `prefs` | `defaultCurrency`, `reportCurrency`, `monthlyBudget`, `nearDupTolerance` |
+
+Device-only settings (passcode, last sync time, linked sync file, device name) live in a separate store and are never synced.
+
+**Sync merge**: per record, the later `updatedAt` wins; on a tie, deletion wins, then a deterministic comparison. Starter data has fixed ids and `updatedAt: 0`, so two fresh devices merge cleanly and any real edit wins. Repeating entries get deterministic ids (`rec-<rule>-<date>`), so two devices generating the same occurrence produce one record, and a deleted occurrence is never re-created.
+
+---
+
+## Development
+
+Requires Node 22 or later (for the dev server, tests and scripts; the app itself needs nothing).
 
 ```bash
-node server.mjs
+npm start            # http://localhost:5173
+npm test             # unit tests
+npm run test:e2e     # browser tests (needs Playwright; run with the dev server up)
+npm run icons        # regenerate PNG icons from app/icons/icon.svg
 ```
 
-Then open:
+When you change files in `app/`, bump `VERSION` in `app/sw.js` so installed copies pick up the update. The app then shows a *Reload* prompt.
 
-- `http://127.0.0.1:3000`
+### Hosting
 
-On first launch, create the single local username and password for the app.
+A phone only installs and runs a web app offline when it's served over HTTPS, so the app is published with **GitHub Pages**:
 
-## Goals
+1. In the repo, go to **Settings › Pages › Build and deployment › Source** and choose **GitHub Actions**.
+2. Push to `main`. The workflow in `.github/workflows/pages.yml` runs the tests and publishes `app/`.
+3. The app is then at `https://<your-username>.github.io/personal-finance-tracker/`.
 
-- Keep all data stored locally on the user's machine
-- Make daily transaction entry fast and readable
-- Support manual entry and bulk imports
-- Allow review and correction of imported transactions before saving
-- Keep categorization editable at all times
-- Provide reliable filtering and reporting
-- Keep the codebase easy to maintain
+This only hosts the app's code. Your financial data never goes to GitHub; it stays in each device's storage and your sync file. If the repository is public, the code is public too (which is fine), but don't commit sync files (`.gitignore` excludes them).
 
-## Product Scope
+### Coming from the old SQLite version
 
-### In Scope for V1
+The first version was a local Node + SQLite server. It's been replaced, because an iPhone can't run it. To bring old data across:
 
-- Single local user account with username and password
-- Local-only storage
-- Manual transaction entry
-- Category and sub-category management
-- Account management using friendly names and last 4 digits
-- Dashboard with filters and editable transaction rows
-- CSV and text-based PDF import
-- Import review screen
-- Duplicate and near-duplicate detection
-- CSV export
-- Formatted PDF export
-
-### Out of Scope for V1
-
-- Cloud sync
-- Multi-user support
-- Mobile app
-- Multi-currency support
-- Screenshot-based import
-- OCR for scanned PDFs
-- External AI services
-
-## Recommended Technical Direction
-
-### Why SQLite Instead of JSON/CSV
-
-Although JSON or CSV files are simpler to inspect directly, SQLite is the better choice for this app because it still stores data locally in a single file while making the following much easier:
-
-- Fast filtering across large date ranges
-- Safe editing of individual transactions
-- Deduplication and import review workflows
-- Category/account relationships
-- Reliable exports and reporting
-- Future migration to desktop packaging
-
-CSV should still be supported as an import and export format, but SQLite should be the primary storage layer.
-
-### Suggested Stack
-
-- Frontend: React
-- Styling: a lightweight CSS approach or component library focused on readability
-- Backend: local Node.js server
-- Database: SQLite
-- ORM or query builder: SQLite-friendly layer for migrations and typed queries
-- CSV import: robust parser
-- PDF import: text extraction for text-based PDFs
-- PDF export: server-side document generation
-- Authentication: local hashed password and local session storage
-
-### Deployment Shape
-
-#### V1
-
-- Run locally in browser
-- Local backend process
-- Local SQLite database file
-
-#### Later
-
-- Wrap the same codebase as a desktop app
-
-## Core Functional Requirements
-
-### 1. Manual Transaction Entry
-
-The user should be able to add a transaction as either:
-
-- Debit
-- Credit
-- Transfer
-
-Each transaction should capture:
-
-- Date
-- Amount
-- Category
-- Sub-category, if present
-- Account, if present
-- Brief note, optional
-
-Rules:
-
-- Note is optional
-- Note maximum length is 70 characters
-- Amount must be positive
-- Transaction type determines how the amount is interpreted
-- Category is required for debit and credit
-- Transfer can use a dedicated transfer category or transfer type handling
-
-### 2. Categories and Sub-Categories
-
-The user should be able to:
-
-- View categories
-- Create categories
-- Edit categories
-- Create sub-categories one level deep only
-- Assign a logo to each category
-
-Rules:
-
-- Maximum 50 top-level categories
-- Each category must have a name
-- Each category must have a logo
-- A default logo is always available
-- User can choose from built-in icons
-- User can optionally upload a custom image up to 300 KB
-- Only one sub-category level is supported
-
-Suggested starter categories:
-
-- Food
-- Groceries
-- Transport
-- Bills
-- Shopping
-- Health
-- Entertainment
-- Travel
-- Income
-- Transfers
-- Miscellaneous
-
-### 3. Accounts
-
-Transactions may optionally be linked to an account.
-
-Account examples:
-
-- HDFC 1234
-- SBI 5678
-- Cash
-
-Rules:
-
-- User can create named accounts
-- Last 4 digits may be stored when relevant
-- Cash-style accounts may exist without last 4 digits
-- Transfers should be editable like any other transaction
-
-### 4. Dashboard and Reporting
-
-The main dashboard should display transactions in a tabular form.
-
-Default filters:
-
-- Date range: last 1 month
-- Category: all categories
-- Type: both debit and credit
-- Account: all accounts
-
-Available filters:
-
-- Start date
-- End date
-- Category
-- Sub-category
-- Transaction type
-- Account
-- Text search on note or description
-
-Capabilities:
-
-- Edit transactions from the table
-- Sort by date, amount, or category
-- View debit, credit, and transfer entries
-- Export current filtered results as CSV
-- Export current filtered results as formatted PDF
-
-### 5. Importing Statements
-
-The app should allow uploading:
-
-- Bank CSV files
-- Bank PDF files
-- Google Pay CSV exports, if available
-- Google Pay PDF exports
-
-V1 import assumptions:
-
-- CSV imports should be treated as reliable first-class input
-- PDF imports should support text-based PDFs only
-- Image-based PDFs and screenshots are deferred
-
-The import pipeline should:
-
-1. Upload file
-2. Detect source type when possible
-3. Parse transactions from file
-4. Infer whether each row is a debit, credit, or transfer
-5. Generate a short normalized description
-6. Suggest category and sub-category using keyword matching
-7. Suggest account where possible
-8. Check duplicates and near duplicates
-9. Present all parsed rows in a review screen
-10. Allow user edits before final save
-11. Save approved rows only
-
-### 6. Categorization Strategy
-
-V1 categorization should be local and rule-based.
-
-Approach:
-
-- Maintain a keyword-to-category mapping
-- Match on merchant names, payment references, and normalized descriptions
-- Suggest category and sub-category
-- Keep all suggestions editable
-
-Examples:
-
-- `swiggy`, `zomato` -> Food
-- `uber`, `ola` -> Transport
-- `salary`, `payroll` -> Income
-- `netflix`, `spotify` -> Entertainment
-
-This avoids cloud dependence while leaving room for future local-model or AI-assisted improvements.
-
-### 7. Deduplication and Near-Duplicate Flags
-
-The system should avoid inserting the same transaction twice.
-
-#### Hard Duplicate
-
-A row should be treated as a duplicate if these fields match an existing transaction:
-
-- Date
-- Amount
-- Type
-- Account
-- Normalized description
-
-Hard duplicates should be excluded from final import by default.
-
-#### Near Duplicate
-
-A row should be flagged for review if:
-
-- Date matches
-- Category matches
-- Amount differs only slightly
-
-Default tolerance:
-
-- Rs. 10
-
-Near duplicates should not be auto-rejected. They should be shown with a warning and allow the user to resolve them as:
-
-- Duplicate
-- Different transaction
-- Resolved and de-flagged
-
-## User Experience Blueprint
-
-### Screen List
-
-1. Login screen
-2. Dashboard screen
-3. Add transaction modal or page
-4. Edit transaction modal or page
-5. Categories management screen
-6. Accounts management screen
-7. Import upload screen
-8. Import review screen
-9. Export/report dialog
-10. Settings screen
-
-### Dashboard UX
-
-The dashboard should prioritize readability and low friction.
-
-Key principles:
-
-- Clean table layout
-- Strong spacing and typographic hierarchy
-- Clear distinction between debits, credits, and transfers
-- Filters visible without clutter
-- Fast inline access to edit actions
-
-Suggested columns:
-
-- Date
-- Type
-- Amount
-- Category
-- Sub-category
-- Account
-- Description
-- Note
-- Flags
-- Actions
-
-### Add/Edit Transaction UX
-
-The entry form should be short and efficient.
-
-Suggested field order:
-
-1. Type
-2. Date
-3. Amount
-4. Account
-5. Category
-6. Sub-category
-7. Note
-
-Behavior:
-
-- Show sub-category only after category is chosen and if sub-categories exist
-- Validate note length live
-- Preserve form state until submission or cancel
-
-### Import Review UX
-
-Each imported row should show:
-
-- Parsed date
-- Parsed amount
-- Inferred type
-- Suggested category
-- Suggested sub-category
-- Suggested account
-- Parsed description
-- Duplicate or near-duplicate status
-- Include/exclude toggle
-
-The user should be able to:
-
-- Edit any field
-- Mark a duplicate warning as resolved
-- Exclude a row from import
-- Confirm only selected rows
-
-## Data Model Blueprint
-
-### Main Entities
-
-#### users
-
-- id
-- username
-- password_hash
-- created_at
-- updated_at
-
-#### accounts
-
-- id
-- name
-- last4 nullable
-- created_at
-- updated_at
-
-#### categories
-
-- id
-- name
-- icon_type
-- icon_value
-- created_at
-- updated_at
-
-Notes:
-
-- `icon_type` can be `builtin` or `upload`
-- `icon_value` can be an icon key or local file reference
-
-#### subcategories
-
-- id
-- category_id
-- name
-- created_at
-- updated_at
-
-#### transactions
-
-- id
-- type
-- date
-- posted_date nullable
-- amount
-- currency
-- category_id
-- subcategory_id nullable
-- account_id nullable
-- description
-- note nullable
-- source
-- import_batch_id nullable
-- flag_status
-- created_at
-- updated_at
-
-Suggested enums:
-
-- `type`: `debit`, `credit`, `transfer`
-- `source`: `manual`, `import`
-- `flag_status`: `none`, `near_duplicate`, `resolved`
-
-#### import_batches
-
-- id
-- source_name
-- file_name
-- file_type
-- imported_at
-- status
-
-#### import_rows
-
-- id
-- import_batch_id
-- raw_date
-- raw_amount
-- raw_description
-- parsed_type
-- parsed_date
-- parsed_posted_date nullable
-- parsed_amount
-- suggested_category_id nullable
-- suggested_subcategory_id nullable
-- suggested_account_id nullable
-- duplicate_status
-- resolution_status
-- include_in_import
-- created_transaction_id nullable
-
-Suggested enums:
-
-- `duplicate_status`: `none`, `hard_duplicate`, `near_duplicate`
-- `resolution_status`: `pending`, `approved`, `excluded`, `resolved_duplicate`, `resolved_distinct`
-
-#### keyword_rules
-
-- id
-- keyword
-- category_id
-- subcategory_id nullable
-- priority
-- created_at
-- updated_at
-
-## Validation Rules
-
-- Username required
-- Password required
-- Category names required
-- Top-level categories capped at 50
-- Sub-categories one level only
-- Note max length 70
-- Uploaded category image max 300 KB
-- Amount must be greater than 0
-- Date required
-- Category required for debit and credit
-- Duplicate detection runs before insert on imported rows
-
-## Import Architecture
-
-### Parsing Stages
-
-1. File intake
-2. Source detection
-3. Raw row extraction
-4. Field normalization
-5. Type inference
-6. Description cleanup
-7. Account matching
-8. Category suggestion
-9. Duplicate analysis
-10. Review payload creation
-
-### Source Adapters
-
-To keep imports maintainable, each statement type should follow an adapter-style structure.
-
-Examples:
-
-- `bank-csv-adapter`
-- `bank-pdf-adapter`
-- `gpay-csv-adapter`
-- `gpay-pdf-adapter`
-
-Each adapter should return normalized rows in the same internal format so the downstream review process is shared.
-
-### Description Normalization
-
-Normalized descriptions should:
-
-- Lowercase text
-- Remove excess whitespace
-- Remove noisy transaction reference fragments where possible
-- Preserve merchant-identifying words
-- Prefer short keyword-oriented descriptions rather than full raw statements
-
-## Export Architecture
-
-### CSV Export
-
-CSV export should reflect the current dashboard filters and column set.
-
-### PDF Export
-
-The PDF report should include:
-
-- Report title
-- Date range
-- Applied filters
-- Generated timestamp
-- Tabular transaction list
-- Summary totals for debit and credit
-
-Optional later enhancement:
-
-- Category totals summary block
-
-## Security Model
-
-This app is local-only, but basic protection is still required.
-
-V1 expectations:
-
-- Single local username/password
-- Password stored as secure hash
-- No plain-text password storage
-- No cloud sync
-- No external transmission of transaction data
-
-This is organizer-level security, not banking-grade security, but it should still follow basic good practice.
-
-## Folder Structure Proposal
-
-```text
-FinanceTracker/
-  README.md
-  client/
-    src/
-      app/
-      components/
-      features/
-        auth/
-        dashboard/
-        transactions/
-        categories/
-        accounts/
-        imports/
-        reports/
-      styles/
-  server/
-    src/
-      api/
-      auth/
-      db/
-      imports/
-        adapters/
-        parsers/
-        classifiers/
-      reports/
-      services/
-      utils/
-  shared/
-    src/
-      types/
-      constants/
-      validators/
-  data/
-    app.db
-    uploads/
-    exports/
+```bash
+npm run migrate-legacy -- path/to/data/app.db legacy-import.json
 ```
 
-Notes:
+Then in the app: **Settings › Sync & backup › Choose file** and pick `legacy-import.json`. Debits and credits become expenses and income, starter categories map onto the new ones, sub-categories become categories named "Sub (Parent)", and description and note are combined into the note.
 
-- `data/` holds all local runtime data
-- uploaded files can be stored temporarily or archived based on product decision
-- exports should be written locally for user download
+---
 
-## Implementation Plan
+## Principles
 
-### Phase 1: Foundation
-
-- Initialize client and server projects
-- Set up SQLite and migrations
-- Create local auth flow
-- Build shared type definitions
-- Add basic app shell and navigation
-
-### Phase 2: Core Data Entry
-
-- Build accounts management
-- Build category and sub-category management
-- Build manual transaction entry
-- Build transactions table
-- Add edit and delete flows
-
-### Phase 3: Filtering and Reporting
-
-- Add dashboard filters
-- Add sorting and search
-- Add CSV export
-- Add formatted PDF export
-
-### Phase 4: Imports
-
-- Build import upload flow
-- Implement CSV adapters
-- Implement PDF text extraction pipeline
-- Build keyword-based categorization
-- Add duplicate and near-duplicate detection
-- Build import review screen
-- Save approved rows
-
-### Phase 5: Hardening
-
-- Improve validation and error handling
-- Add audit-friendly status markers on imported rows
-- Add seed data for starter categories and icons
-- Add tests for parsing and deduplication
-
-## Testing Strategy
-
-### Unit Tests
-
-- Validators
-- Keyword classification
-- Duplicate detection
-- Amount/date normalization
-- Statement adapter parsing
-
-### Integration Tests
-
-- Transaction creation and editing
-- Category/sub-category flows
-- Import review and save flow
-- Dashboard filters
-- CSV and PDF export
-
-### Manual Test Scenarios
-
-- Add a debit manually
-- Add a credit manually
-- Add a transfer
-- Create and edit categories
-- Create sub-categories
-- Import bank CSV with duplicates
-- Import PDF with near-duplicates
-- Resolve flagged rows
-- Export filtered dashboard to CSV and PDF
-
-## Open Decisions for Build Start
-
-These are not blockers, but should be finalized when implementation begins:
-
-- Which React framework to use, if any
-- Which icon set to adopt for default category logos
-- Whether uploaded category images are stored in the database or local filesystem
-- Whether transactions support soft delete or hard delete
-- Whether imported source files are retained after processing
-
-## Recommended Build Principles
-
-- Keep the UI highly readable rather than dense
-- Treat imports as editable suggestions, not truth
-- Prefer simple deterministic rules over hidden automation
-- Keep all data portable and local
-- Build browser-first, but avoid choices that block desktop packaging later
-
-## Definition of Done for V1
-
-V1 is complete when the user can:
-
-- Log in locally
-- Create and manage accounts, categories, and sub-categories
-- Add and edit debit, credit, and transfer transactions
-- View transactions in a filterable dashboard
-- Import CSV and text-based PDF statements
-- Review parsed rows before saving
-- Detect duplicates and near duplicates
-- Resolve flags manually
-- Export filtered data as CSV and formatted PDF
-
-## Next Step
-
-The next implementation step should be to scaffold the project and lock in the concrete stack choices for:
-
-- frontend framework
-- backend framework
-- SQLite library or ORM
-- PDF parsing library
-- PDF generation library
-
-Once those are chosen, the repository can be initialized directly against this blueprint.
-# personal-finance-tracker
+- Fast to enter, calm to read. Few screens, no clutter, numbers first.
+- Your data, on your devices. No accounts, no tracking, no external services.
+- Suggestions are plain, specific and editable. No hidden automation.
+- Simple deterministic rules over cleverness, so the numbers can be trusted.
+- No build step and no dependencies, so it's easy to keep working for years.
